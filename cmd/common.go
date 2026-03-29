@@ -249,9 +249,14 @@ func PrintUsingHub(endpoint string) {
 }
 
 // wrapHubError wraps a Hub error with guidance to disable Hub integration.
+// Includes actionable remediation for common failure modes.
 func wrapHubError(err error) error {
 	if apiclient.IsUnauthorizedError(err) {
-		return fmt.Errorf("authentication failed, login to hub with 'scion hub auth login'")
+		return fmt.Errorf("Hub authentication failed.\n\n  Fix: scion hub auth login\n  Or use local mode: scion hub disable")
+	}
+	errStr := err.Error()
+	if strings.Contains(errStr, "connection refused") || strings.Contains(errStr, "no such host") || strings.Contains(errStr, "i/o timeout") {
+		return fmt.Errorf("Hub unreachable: %w\n\n  The Hub at the configured endpoint is not responding.\n  Options:\n    - Check Hub is running and network is available\n    - Skip Hub for this command: add --no-hub flag\n    - Disable Hub permanently: scion hub disable", err)
 	}
 	return fmt.Errorf("%w\n\nTo use local-only mode, run: scion hub disable", err)
 }
@@ -482,7 +487,14 @@ func RunAgent(cmd *cobra.Command, args []string, resume bool) error {
 		util.Debugf("[auth]   cloudProject=%q, cloudRegion=%q", localAuth.GoogleCloudProject, localAuth.GoogleCloudRegion)
 	}
 
-	// We still might want to show some progress in the CLI
+	// Progress reporting — show step-by-step feedback during agent start
+	// instead of silence. This is the #1 DX complaint: 10-30s of no output.
+	if !isJSONOutput() {
+		opts.OnProgress = func(step string) {
+			fmt.Fprintf(os.Stderr, "  %s\n", step)
+		}
+	}
+
 	if resume {
 		statusf("Resuming agent '%s'...\n", agentName)
 	} else {
@@ -500,13 +512,14 @@ func RunAgent(cmd *cobra.Command, args []string, resume bool) error {
 
 	if !info.Detached {
 		statusf("Attaching to agent '%s'...\n", agentName)
+		fmt.Fprintf(os.Stderr, "  Waiting for agent to initialize...\n")
 
 		// Wait for the container to be ready before attaching.
 		// After container start, sciontool init needs time to set up the user,
 		// run pre-start hooks, and launch the child process. The tmux session
 		// must exist before we can attach.
 		if err := waitForTmuxSession(rt, agentName); err != nil {
-			return err
+			return fmt.Errorf("%w\n\nTroubleshooting:\n  - Check container logs: scion logs %s\n  - Verify image exists: docker images | grep scion\n  - Check Docker is running: docker info", err, agentName)
 		}
 
 		return rt.Attach(context.Background(), agentName)
@@ -531,7 +544,15 @@ func RunAgent(cmd *cobra.Command, args []string, resume bool) error {
 		})
 	}
 
-	statusf("Agent '%s' %s successfully (ID: %s)\n", agentName, displayStatus, info.ID)
+	statusf("Agent '%s' %s successfully.\n", agentName, displayStatus)
+
+	// Auto-tail: when starting detached (no --attach), show the first few
+	// seconds of agent output so the user knows it's working. This eliminates
+	// the "did it work?" anxiety for the most common usage pattern.
+	if info.Detached && !isJSONOutput() {
+		fmt.Fprintf(os.Stderr, "\n  %sTip:%s Attach with: scion attach %s\n", util.Bold, util.Reset, agentName)
+		fmt.Fprintf(os.Stderr, "  %sTip:%s View logs with: scion logs %s --follow\n\n", util.Bold, util.Reset, agentName)
+	}
 
 	return nil
 }

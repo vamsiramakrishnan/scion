@@ -20,6 +20,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -919,6 +920,10 @@ func (s *Server) handleAgentAction(w http.ResponseWriter, r *http.Request, id, g
 		s.checkAgentPrompt(w, r, id, groveID)
 	case "finalize-env":
 		s.finalizeEnv(w, r, id)
+	case "git-diff":
+		s.getGitDiff(w, r, id, groveID)
+	case "git-status":
+		s.getGitStatus(w, r, id, groveID)
 	default:
 		NotFound(w, "Action")
 	}
@@ -1349,6 +1354,133 @@ func (s *Server) getLogs(w http.ResponseWriter, r *http.Request, id, groveID str
 	w.Header().Set("Content-Type", "text/plain")
 	w.WriteHeader(http.StatusOK)
 	w.Write([]byte(logs))
+}
+
+// getGitDiff returns the git diff for an agent's worktree (changes vs main branch).
+func (s *Server) getGitDiff(w http.ResponseWriter, r *http.Request, id, groveID string) {
+	ctx := r.Context()
+
+	mgr := s.resolveManagerForAgent(ctx, id, groveID)
+	agents, err := mgr.List(ctx, map[string]string{"scion.agent": "true"})
+	if err != nil {
+		RuntimeError(w, "Failed to list agents: "+err.Error())
+		return
+	}
+
+	var found *api.AgentInfo
+	for i := range agents {
+		if matchesAgent(agents[i], id, groveID) {
+			found = &agents[i]
+			break
+		}
+	}
+
+	if found == nil {
+		NotFound(w, "Agent")
+		return
+	}
+
+	// Resolve workspace path
+	workspacePath := found.WorkspacePath
+	if workspacePath == "" && found.GrovePath != "" {
+		workspacePath = filepath.Join(found.GrovePath, ".scion", "agents", found.Slug, "workspace")
+	}
+
+	if workspacePath == "" {
+		writeJSON(w, http.StatusOK, map[string]string{"diff": "", "error": "workspace path not found"})
+		return
+	}
+
+	// Run git diff against main
+	base := r.URL.Query().Get("base")
+	if base == "" {
+		base = "main"
+	}
+
+	cmd := exec.CommandContext(ctx, "git", "diff", base+"...HEAD")
+	cmd.Dir = workspacePath
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		// Fallback: try git diff HEAD (no base branch)
+		cmd2 := exec.CommandContext(ctx, "git", "diff", "HEAD")
+		cmd2.Dir = workspacePath
+		output2, err2 := cmd2.CombinedOutput()
+		if err2 != nil {
+			writeJSON(w, http.StatusOK, map[string]interface{}{
+				"diff":  string(output),
+				"error": err.Error(),
+			})
+			return
+		}
+		output = output2
+	}
+
+	w.Header().Set("Content-Type", "text/plain")
+	w.WriteHeader(http.StatusOK)
+	w.Write(output)
+}
+
+// getGitStatus returns the git status for an agent's worktree.
+func (s *Server) getGitStatus(w http.ResponseWriter, r *http.Request, id, groveID string) {
+	ctx := r.Context()
+
+	mgr := s.resolveManagerForAgent(ctx, id, groveID)
+	agents, err := mgr.List(ctx, map[string]string{"scion.agent": "true"})
+	if err != nil {
+		RuntimeError(w, "Failed to list agents: "+err.Error())
+		return
+	}
+
+	var found *api.AgentInfo
+	for i := range agents {
+		if matchesAgent(agents[i], id, groveID) {
+			found = &agents[i]
+			break
+		}
+	}
+
+	if found == nil {
+		NotFound(w, "Agent")
+		return
+	}
+
+	workspacePath := found.WorkspacePath
+	if workspacePath == "" && found.GrovePath != "" {
+		workspacePath = filepath.Join(found.GrovePath, ".scion", "agents", found.Slug, "workspace")
+	}
+
+	if workspacePath == "" {
+		writeJSON(w, http.StatusOK, map[string]string{"status": "", "error": "workspace path not found"})
+		return
+	}
+
+	// Run git status --porcelain for machine-parseable output
+	cmd := exec.CommandContext(ctx, "git", "status", "--porcelain")
+	cmd.Dir = workspacePath
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		writeJSON(w, http.StatusOK, map[string]interface{}{
+			"status": string(output),
+			"error":  err.Error(),
+		})
+		return
+	}
+
+	// Also get commit log vs main
+	logCmd := exec.CommandContext(ctx, "git", "log", "--oneline", "main..HEAD")
+	logCmd.Dir = workspacePath
+	logOutput, _ := logCmd.CombinedOutput()
+
+	// Get branch name
+	branchCmd := exec.CommandContext(ctx, "git", "rev-parse", "--abbrev-ref", "HEAD")
+	branchCmd.Dir = workspacePath
+	branchOutput, _ := branchCmd.CombinedOutput()
+
+	writeJSON(w, http.StatusOK, map[string]string{
+		"status":  strings.TrimSpace(string(output)),
+		"commits": strings.TrimSpace(string(logOutput)),
+		"branch":  strings.TrimSpace(string(branchOutput)),
+	})
 }
 
 func (s *Server) getStats(w http.ResponseWriter, r *http.Request, id, groveID string) {

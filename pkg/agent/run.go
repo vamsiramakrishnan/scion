@@ -90,6 +90,14 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 		startInlineConfig = &api.ScionConfig{AuthSelectedType: opts.HarnessAuth}
 	}
 
+	// progress reports a step to the CLI (if a callback is provided)
+	progress := func(step string) {
+		if opts.OnProgress != nil {
+			opts.OnProgress(step)
+		}
+	}
+
+	progress("Preparing workspace...")
 	util.Debugf("Start: calling GetAgent name=%s template=%q image=%q harnessConfig=%q grovePath=%q profile=%q",
 		opts.Name, opts.Template, opts.Image, opts.HarnessConfig, opts.GrovePath, opts.Profile)
 	agentDir, agentHome, agentWorkspace, finalScionCfg, err := GetAgent(ctx, opts.Name, opts.Template, opts.Image, opts.HarnessConfig, opts.GrovePath, opts.Profile, "", opts.Branch, opts.Workspace, startInlineConfig)
@@ -313,6 +321,7 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 	// later projected into the container environment).
 	authEnvOverlay := buildAuthEnvOverlay(opts.Env, opts.ResolvedSecrets)
 
+	progress("Resolving credentials...")
 	var auth api.AuthConfig
 	var resolvedAuth *api.ResolvedAuth
 	if !opts.NoAuth {
@@ -388,8 +397,10 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 		detached = *opts.Detached
 	}
 
+	progress("Checking container image...")
 	exists, err := m.Runtime.ImageExists(ctx, resolvedImage)
 	if err != nil || !exists {
+		progress("Pulling image " + resolvedImage + "...")
 		if err := m.Runtime.PullImage(ctx, resolvedImage); err != nil {
 			return nil, fmt.Errorf("failed to pull image '%s': %w", resolvedImage, err)
 		}
@@ -721,6 +732,7 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 			"scion.grove_path": projectDir,
 		},
 	}
+	progress("Starting container...")
 	id, err := m.Runtime.Run(ctx, runCfg)
 	if err != nil {
 		if strings.Contains(err.Error(), "executable file not found") ||

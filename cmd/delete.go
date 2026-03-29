@@ -15,6 +15,7 @@
 package cmd
 
 import (
+	"bufio"
 	"context"
 	"fmt"
 	"os"
@@ -33,6 +34,7 @@ import (
 )
 
 var deleteStopped bool
+var deleteForce bool
 
 // deleteCmd represents the delete command
 var deleteCmd = &cobra.Command{
@@ -149,6 +151,23 @@ var deleteCmd = &cobra.Command{
 		// Use Hub if available
 		if hubCtx != nil {
 			return deleteAgentsViaHub(hubCtx, args)
+		}
+
+		// Confirm before destructive deletion (unless --force or --json)
+		if !deleteForce && !isJSONOutput() && !deleteStopped {
+			branchWarning := ""
+			if !preserveBranch {
+				branchWarning = " (including git branches)"
+			}
+			fmt.Fprintf(os.Stderr, "Delete %d agent(s)%s: %s\n", len(args), branchWarning, strings.Join(args, ", "))
+			fmt.Fprintf(os.Stderr, "Are you sure? [y/N] ")
+			reader := bufio.NewReader(os.Stdin)
+			answer, _ := reader.ReadString('\n')
+			answer = strings.TrimSpace(strings.ToLower(answer))
+			if answer != "y" && answer != "yes" {
+				fmt.Fprintln(os.Stderr, "Cancelled.")
+				return nil
+			}
 		}
 
 		// Local mode - delete each agent
@@ -357,4 +376,5 @@ func init() {
 	rootCmd.AddCommand(deleteCmd)
 	deleteCmd.Flags().BoolVarP(&preserveBranch, "preserve-branch", "b", false, "Preserve the git branch associated with the worktree")
 	deleteCmd.Flags().BoolVar(&deleteStopped, "stopped", false, "Delete all agents with stopped containers")
+	deleteCmd.Flags().BoolVarP(&deleteForce, "force", "f", false, "Skip confirmation prompt")
 }

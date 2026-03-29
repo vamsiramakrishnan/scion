@@ -328,6 +328,12 @@ type ScionConfig struct {
 
 	Secrets []RequiredSecret `json:"secrets,omitempty" yaml:"secrets,omitempty"`
 
+	// Hub access scopes for agent-to-agent orchestration.
+	// When set in a template's scion-agent.yaml, these scopes are granted
+	// to the agent's JWT token, enabling it to create/manage other agents.
+	// Example scopes: "grove:agent:create", "grove:agent:lifecycle"
+	HubAccessScopes []string `json:"hub_access_scopes,omitempty" yaml:"hub_access_scopes,omitempty"`
+
 	// Agnostic template fields
 	AgentInstructions    string `json:"agent_instructions,omitempty" yaml:"agent_instructions,omitempty"`
 	SystemPrompt         string `json:"system_prompt,omitempty" yaml:"system_prompt,omitempty"`
@@ -551,6 +557,10 @@ func IsBrokerModeFromContext(ctx context.Context) bool {
 	return v
 }
 
+// ProgressFunc is called during agent start to report progress steps.
+// Used by the CLI to show step-by-step feedback instead of silence.
+type ProgressFunc func(step string)
+
 type StartOptions struct {
 	Name              string
 	Task              string
@@ -574,6 +584,7 @@ type StartOptions struct {
 	TelemetryOverride *bool           // Explicit telemetry override from CLI flags (--enable-telemetry / --disable-telemetry)
 	InlineConfig      *ScionConfig    // Inline config from --config flag, merged over template config
 	SharedDirs        []SharedDir     // Grove-level shared directories (from Hub, merged with settings)
+	OnProgress        ProgressFunc    // Optional callback for reporting progress steps to the CLI
 }
 
 type StatusEvent struct {

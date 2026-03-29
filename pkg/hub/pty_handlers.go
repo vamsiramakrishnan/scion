@@ -30,13 +30,16 @@ import (
 	"github.com/gorilla/websocket"
 )
 
-// PTY endpoint configuration
+// PTY endpoint configuration — buffers sized for terminal output throughput.
+// Terminal streams are bursty (build output, large diffs), so larger buffers
+// reduce syscall overhead and fragmentation compared to the default 4KB.
 const (
-	ptyReadBufferSize  = 4096
-	ptyWriteBufferSize = 4096
+	ptyReadBufferSize  = 16384 // 16KB: accommodate large paste/input bursts
+	ptyWriteBufferSize = 32768 // 32KB: accommodate bursty terminal output
 	ptyPongWait        = 60 * time.Second
 	ptyPingInterval    = 30 * time.Second
 	ptyWriteWait       = 10 * time.Second
+	ptyMaxDataSize     = 32 * 1024 // 32KB: max data per PTY message
 )
 
 var ptyUpgrader = websocket.Upgrader{
@@ -45,6 +48,15 @@ var ptyUpgrader = websocket.Upgrader{
 	CheckOrigin: func(r *http.Request) bool {
 		// Auth is checked before upgrade
 		return true
+	},
+}
+
+// ptyBufPool reuses byte buffers for PTY data to reduce GC pressure.
+// Each buffer is sized for the max PTY data message (32KB).
+var ptyBufPool = sync.Pool{
+	New: func() any {
+		buf := make([]byte, 0, ptyMaxDataSize)
+		return &buf
 	},
 }
 
@@ -290,6 +302,8 @@ func (s *PTYSession) readFromClient() error {
 }
 
 // readFromBroker reads data from the broker stream and forwards to client.
+// Uses binary WebSocket frames for PTY data to avoid JSON+Base64 overhead
+// (~33% bandwidth savings compared to the previous JSON encoding).
 func (s *PTYSession) readFromBroker() error {
 	for {
 		data, err := s.stream.Read(s.ctx)
@@ -297,14 +311,29 @@ func (s *PTYSession) readFromBroker() error {
 			return err
 		}
 
-		msg := wsprotocol.NewPTYDataMessage(data)
-		if err := s.writeToClient(msg); err != nil {
+		// Send raw binary data directly — no JSON wrapping or Base64 encoding.
+		// Clients should handle both binary frames (new) and JSON text frames
+		// (legacy) for backward compatibility during the transition.
+		if err := s.writeBinaryToClient(data); err != nil {
 			return err
 		}
 	}
 }
 
-// writeToClient writes a message to the WebSocket client.
+// writeBinaryToClient writes raw binary data as a WebSocket binary message.
+// This avoids the JSON marshal + Base64 encode overhead for PTY data.
+func (s *PTYSession) writeBinaryToClient(data []byte) error {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+
+	if err := s.conn.SetWriteDeadline(time.Now().Add(ptyWriteWait)); err != nil {
+		return err
+	}
+	return s.conn.WriteMessage(websocket.BinaryMessage, data)
+}
+
+// writeToClient writes a JSON message to the WebSocket client.
+// Used for control messages (resize, etc.) that benefit from structured format.
 func (s *PTYSession) writeToClient(v interface{}) error {
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()

@@ -163,47 +163,78 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 	var wg sync.WaitGroup
 	errCh := make(chan error, 3)
 
-	// 8. Initialize store
-	var s store.Store
+	// 8. Initialize store, broker settings, dev auth, and plugins in parallel.
+	// These operations are independent and can run concurrently to reduce
+	// startup time (especially store init which runs DB migrations).
+	type initResults struct {
+		store          store.Store
+		brokerSettings *config.Settings
+		devAuthToken   string
+		pluginMgr      *scionplugin.Manager
+		storeErr       error
+		authErr        error
+	}
+	var ir initResults
+
+	var initWg sync.WaitGroup
+
+	// Store initialization (includes migrations — typically the slowest step)
 	if enableHub {
-		s, err = initStore(cfg)
-		if err != nil {
-			return err
+		initWg.Add(1)
+		go func() {
+			defer initWg.Done()
+			ir.store, ir.storeErr = initStore(cfg)
+		}()
+	}
+
+	// Broker settings + dev auth + plugin manager (fast, I/O-bound)
+	initWg.Add(1)
+	go func() {
+		defer initWg.Done()
+		bs, bsErr := config.LoadSettings("")
+		if bsErr != nil {
+			log.Printf("Warning: failed to load settings: %v", bsErr)
+			bs = &config.Settings{}
 		}
+		if bs.Hub == nil {
+			bs.Hub = &config.HubClientConfig{}
+		}
+		ir.brokerSettings = bs
+
+		if cfg.Auth.Enabled {
+			ir.devAuthToken, ir.authErr = initDevAuth(cfg, globalDir)
+		}
+
+		ir.pluginMgr = initPluginManager()
+	}()
+
+	initWg.Wait()
+
+	// Check for errors from parallel initialization
+	if ir.storeErr != nil {
+		return ir.storeErr
+	}
+	if ir.authErr != nil {
+		return ir.authErr
+	}
+
+	var s store.Store = ir.store
+	if s != nil {
 		if closer, ok := s.(io.Closer); ok {
 			defer closer.Close()
 		}
 	}
+	brokerSettings := ir.brokerSettings
+	devAuthToken := ir.devAuthToken
+	pluginMgr := ir.pluginMgr
+	defer pluginMgr.Shutdown()
+	harness.SetPluginManager(pluginMgr)
 
-	// Load settings early so both Hub and Broker can use grove-level hub.endpoint.
-	brokerSettings, err := config.LoadSettings("")
-	if err != nil {
-		log.Printf("Warning: failed to load settings: %v", err)
-		brokerSettings = &config.Settings{}
-	}
-	if brokerSettings.Hub == nil {
-		brokerSettings.Hub = &config.HubClientConfig{}
-	}
-
-	// 9. Initialize dev auth
-	var devAuthToken string
-	if cfg.Auth.Enabled {
-		devAuthToken, err = initDevAuth(cfg, globalDir)
-		if err != nil {
-			return err
-		}
-	}
-
-	// 10. Resolve hub endpoint
+	// Resolve hub endpoint (depends on brokerSettings)
 	hubEndpoint := resolveHubEndpoint(cfg, brokerSettings)
 
 	// Parse admin emails
 	adminEmailList := parseAdminEmails(cfg)
-
-	// 10b. Initialize plugin manager
-	pluginMgr := initPluginManager()
-	defer pluginMgr.Shutdown()
-	harness.SetPluginManager(pluginMgr)
 
 	// 11. Start Hub
 	var hubSrv *hub.Server

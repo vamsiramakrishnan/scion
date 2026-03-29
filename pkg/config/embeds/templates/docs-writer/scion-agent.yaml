@@ -1,0 +1,6 @@
+schema_version: "1"
+description: "Documentation writer — creates and improves docs, READMEs, API references, and guides"
+agent_instructions: agents.md
+system_prompt: system-prompt.md
+env:
+  SCION_ROLE: docs-writer

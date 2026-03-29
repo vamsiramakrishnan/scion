@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "allow": ["Read", "Grep", "Glob", "Bash(git *)", "Bash(gh *)", "WebFetch"]
+  },
+  "env": {},
+  "mcpServers": {
+    "github": {
+      "command": "npx",
+      "args": ["-y", "@anthropic-ai/github-mcp-server"],
+      "env": {
+        "GITHUB_PERSONAL_ACCESS_TOKEN": "${GITHUB_TOKEN}"
+      }
+    }
+  }
+}

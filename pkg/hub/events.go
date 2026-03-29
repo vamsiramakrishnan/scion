@@ -20,6 +20,7 @@ import (
 	"log/slog"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
@@ -171,12 +172,22 @@ type NotificationCreatedEvent struct {
 	CreatedAt string `json:"createdAt"`
 }
 
+// subscriberBufferSize is the channel buffer capacity per subscriber.
+// Sized to handle bursts (e.g., starting 10+ agents simultaneously) without
+// dropping events. Increased from 64 to 256 based on production observation
+// of dropped events under multi-agent workloads.
+const subscriberBufferSize = 256
+
 // ChannelEventPublisher is an in-process event publisher that fans out events
 // to Go channel subscribers using NATS-style subject matching.
 type ChannelEventPublisher struct {
 	mu          sync.RWMutex
 	subscribers map[string][]chan Event
 	closed      bool
+
+	// Metrics for observability — exposed via DroppedEvents() for monitoring.
+	droppedEvents atomic.Int64
+	totalEvents   atomic.Int64
 }
 
 // NewChannelEventPublisher creates a new ChannelEventPublisher.
@@ -186,11 +197,21 @@ func NewChannelEventPublisher() *ChannelEventPublisher {
 	}
 }
 
+// DroppedEvents returns the total number of events dropped due to slow subscribers.
+func (p *ChannelEventPublisher) DroppedEvents() int64 {
+	return p.droppedEvents.Load()
+}
+
+// TotalEvents returns the total number of events published.
+func (p *ChannelEventPublisher) TotalEvents() int64 {
+	return p.totalEvents.Load()
+}
+
 // Subscribe returns a channel that receives events matching the given patterns,
-// and an unsubscribe function. The channel is buffered with capacity 64.
+// and an unsubscribe function. The channel is buffered with subscriberBufferSize capacity.
 // Patterns use NATS-style wildcards: * matches a single token, > matches the remainder.
 func (p *ChannelEventPublisher) Subscribe(patterns ...string) (<-chan Event, func()) {
-	ch := make(chan Event, 64)
+	ch := make(chan Event, subscriberBufferSize)
 
 	p.mu.Lock()
 	for _, pattern := range patterns {
@@ -216,7 +237,8 @@ func (p *ChannelEventPublisher) Subscribe(patterns ...string) (<-chan Event, fun
 }
 
 // publish marshals the event to JSON and fans out to matching subscribers.
-// Sends are non-blocking: events are dropped if a subscriber's buffer is full.
+// Sends are non-blocking: events are dropped if a subscriber's buffer is full,
+// and dropped events are counted for observability.
 func (p *ChannelEventPublisher) publish(subject string, event interface{}) {
 	data, err := json.Marshal(event)
 	if err != nil {
@@ -225,6 +247,7 @@ func (p *ChannelEventPublisher) publish(subject string, event interface{}) {
 	}
 
 	evt := Event{Subject: subject, Data: data}
+	p.totalEvents.Add(1)
 
 	p.mu.RLock()
 	defer p.mu.RUnlock()
@@ -239,7 +262,16 @@ func (p *ChannelEventPublisher) publish(subject string, event interface{}) {
 				select {
 				case ch <- evt:
 				default:
-					// Drop event on full buffer (backpressure)
+					dropped := p.droppedEvents.Add(1)
+					// Log periodically (every 100 drops) to avoid flooding logs
+					if dropped%100 == 1 {
+						slog.Warn("Event dropped: subscriber buffer full",
+							"subject", subject,
+							"total_dropped", dropped,
+							"buffer_cap", cap(ch),
+							"buffer_len", len(ch),
+						)
+					}
 				}
 			}
 		}

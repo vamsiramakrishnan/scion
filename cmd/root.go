@@ -37,6 +37,24 @@ var rootCmd = &cobra.Command{
 concurrent LLM agents. It enables parallel execution of specialized
 sub-agents with isolated identities, credentials, and workspaces.
 
+Key Concepts:
+  grove       A project workspace (like a git repo). Each grove has its own
+              agents, templates, and settings. Created with 'scion init'.
+  agent       A containerized AI coding assistant (Claude, Gemini, Codex).
+              Each agent has its own workspace, git branch, and terminal.
+  template    A role definition for agents (code-reviewer, architect, etc.).
+              Includes system prompt, skills, and configuration.
+  harness     The AI provider backend (claude, gemini, codex, opencode).
+              Each harness has its own config format and auth method.
+  profile     A deployment target (local, remote, kubernetes). Profiles
+              configure which runtime and settings to use.
+
+Getting Started:
+  scion quickstart              Interactive setup wizard
+  scion start agent "task"      Launch an agent
+  scion status                  Check system health
+  scion marketplace list        Browse MCP servers and skills
+
 Use --non-interactive for scripted/automated usage. This implies --yes
 and causes any prompt that cannot be resolved without user input to
 return an error instead of blocking.`,

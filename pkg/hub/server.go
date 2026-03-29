@@ -25,6 +25,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/http/pprof"
 	"strings"
 	"sync"
 	"time"
@@ -183,6 +184,13 @@ type AgentDispatcher interface {
 
 	// DispatchAgentLogs retrieves agent.log content from the runtime broker.
 	DispatchAgentLogs(ctx context.Context, agent *store.Agent, tail int) (string, error)
+
+	// DispatchAgentGitDiff retrieves the git diff for an agent's worktree.
+	// The base parameter specifies the comparison branch (default: "main").
+	DispatchAgentGitDiff(ctx context.Context, agent *store.Agent, base string) (string, error)
+
+	// DispatchAgentGitStatus retrieves git status for an agent's worktree.
+	DispatchAgentGitStatus(ctx context.Context, agent *store.Agent) (map[string]string, error)
 
 	// DispatchCheckAgentPrompt checks if an agent has a non-empty prompt.md file.
 	DispatchCheckAgentPrompt(ctx context.Context, agent *store.Agent) (bool, error)
@@ -1709,12 +1717,28 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/v1/messages", s.handleMessages)
 	s.mux.HandleFunc("/api/v1/messages/", s.handleMessageRoutes)
 
+	// Debug profiling endpoints (only enabled with --debug flag)
+	if s.config.Debug {
+		s.mux.HandleFunc("/debug/pprof/", pprof.Index)
+		s.mux.HandleFunc("/debug/pprof/cmdline", pprof.Cmdline)
+		s.mux.HandleFunc("/debug/pprof/profile", pprof.Profile)
+		s.mux.HandleFunc("/debug/pprof/symbol", pprof.Symbol)
+		s.mux.HandleFunc("/debug/pprof/trace", pprof.Trace)
+		slog.Info("pprof profiling endpoints enabled at /debug/pprof/")
+	}
+
 	// WebSocket control channel endpoint for Runtime Brokers
 	s.mux.HandleFunc("/api/v1/runtime-brokers/connect", s.handleRuntimeBrokerConnect)
 
 	// GCP identity endpoints (agent token auth)
 	s.mux.HandleFunc("/api/v1/agent/gcp-token", s.handleAgentGCPToken)
 	s.mux.HandleFunc("/api/v1/agent/gcp-identity-token", s.handleAgentGCPIdentityToken)
+
+	// Live activity feed (SSE stream of all agent events in a grove)
+	s.mux.HandleFunc("/api/v1/activity-feed", s.handleActivityFeed)
+
+	// Cost summary endpoint (aggregated cost data per grove)
+	// Matched by the grove routes handler for /api/v1/groves/{id}/cost-summary
 
 	// Public settings endpoint (no auth required for telemetry default, etc.)
 	s.mux.HandleFunc("/api/v1/settings/public", s.handlePublicSettings)

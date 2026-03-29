@@ -31,46 +31,87 @@ import (
 // SQLiteStore implements the Store interface using SQLite.
 type SQLiteStore struct {
 	db *sql.DB
+	// readDB is a separate connection pool for read-only queries.
+	// WAL mode allows concurrent readers alongside a single writer,
+	// so splitting read/write connections improves throughput under load.
+	readDB *sql.DB
 }
 
 // New creates a new SQLite store with the given database path.
 // Use ":memory:" for an in-memory database.
 func New(dbPath string) (*SQLiteStore, error) {
-	db, err := sql.Open("sqlite", dbPath)
+	// Writer connection: single connection to serialize writes and keep
+	// per-connection PRAGMAs consistent.
+	writeDB, err := sql.Open("sqlite", dbPath)
 	if err != nil {
 		if strings.Contains(err.Error(), "unknown driver") {
 			return nil, fmt.Errorf("sqlite driver not registered; was the binary built with -tags no_sqlite? %w", err)
 		}
 		return nil, fmt.Errorf("failed to open database: %w", err)
 	}
+	writeDB.SetMaxOpenConns(1)
 
-	// Limit to a single connection so that per-connection PRAGMAs
-	// (foreign_keys, journal_mode) are applied consistently. SQLite
-	// serializes writes anyway, so this has no performance impact.
-	db.SetMaxOpenConns(1)
-
-	// Enable foreign keys and WAL mode for better performance
-	if _, err := db.Exec("PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL;"); err != nil {
-		db.Close()
-		return nil, fmt.Errorf("failed to configure database: %w", err)
+	if _, err := writeDB.Exec("PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL;"); err != nil {
+		writeDB.Close()
+		return nil, fmt.Errorf("failed to configure write database: %w", err)
 	}
 
-	return &SQLiteStore{db: db}, nil
+	// Reader connection pool: allows concurrent reads without blocking on
+	// the write connection. WAL mode supports this natively.
+	readDB, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		writeDB.Close()
+		return nil, fmt.Errorf("failed to open read database: %w", err)
+	}
+	readDB.SetMaxOpenConns(4)
+	readDB.SetMaxIdleConns(4)
+
+	if _, err := readDB.Exec("PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL;"); err != nil {
+		readDB.Close()
+		writeDB.Close()
+		return nil, fmt.Errorf("failed to configure read database: %w", err)
+	}
+
+	return &SQLiteStore{db: writeDB, readDB: readDB}, nil
 }
 
-// Close closes the database connection.
+// Close closes both the write and read database connections.
 func (s *SQLiteStore) Close() error {
-	return s.db.Close()
+	var errs []error
+	if s.readDB != nil {
+		if err := s.readDB.Close(); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	if err := s.db.Close(); err != nil {
+		errs = append(errs, err)
+	}
+	return errors.Join(errs...)
 }
 
-// DB returns the underlying *sql.DB for direct access in tests.
+// DB returns the underlying write *sql.DB for direct access in tests.
 func (s *SQLiteStore) DB() *sql.DB {
 	return s.db
 }
 
-// Ping checks database connectivity.
+// ReadDB returns the read-only connection pool for queries that don't
+// modify data. Falls back to the write connection if readDB is nil.
+func (s *SQLiteStore) ReadDB() *sql.DB {
+	if s.readDB != nil {
+		return s.readDB
+	}
+	return s.db
+}
+
+// Ping checks database connectivity on both pools.
 func (s *SQLiteStore) Ping(ctx context.Context) error {
-	return s.db.PingContext(ctx)
+	if err := s.db.PingContext(ctx); err != nil {
+		return err
+	}
+	if s.readDB != nil {
+		return s.readDB.PingContext(ctx)
+	}
+	return nil
 }
 
 // Migrate applies database migrations.
@@ -116,6 +157,8 @@ func (s *SQLiteStore) Migrate(ctx context.Context) error {
 		migrationV38,
 		migrationV39,
 		migrationV40,
+		migrationV41,
+		migrationV42,
 	}
 
 	// Create migrations table if not exists
@@ -130,7 +173,7 @@ func (s *SQLiteStore) Migrate(ctx context.Context) error {
 
 	// Get current version
 	var currentVersion int
-	err := s.db.QueryRowContext(ctx, "SELECT COALESCE(MAX(version), 0) FROM schema_migrations").Scan(&currentVersion)
+	err := s.ReadDB().QueryRowContext(ctx, "SELECT COALESCE(MAX(version), 0) FROM schema_migrations").Scan(&currentVersion)
 	if err != nil {
 		return fmt.Errorf("failed to get current schema version: %w", err)
 	}
@@ -937,6 +980,33 @@ CREATE INDEX IF NOT EXISTS idx_groves_default_runtime_broker ON groves(default_r
 PRAGMA foreign_keys=ON;
 `
 
+// Migration V41: Performance indices for common query patterns
+const migrationV41 = `
+-- Covering index for agent listing ordered by creation time (most common query)
+CREATE INDEX IF NOT EXISTS idx_agents_grove_created ON agents(grove_id, created_at DESC);
+-- Index for phase filtering (used by ListAgents with phase filter)
+CREATE INDEX IF NOT EXISTS idx_agents_grove_phase ON agents(grove_id, phase);
+-- Index for soft-delete filtering combined with grove (common compound filter)
+CREATE INDEX IF NOT EXISTS idx_agents_grove_not_deleted ON agents(grove_id, deleted_at) WHERE deleted_at IS NULL;
+-- Index for owner-based queries (used in access control checks)
+CREATE INDEX IF NOT EXISTS idx_agents_owner ON agents(owner_id);
+-- Composite index for grove provider lookups (used in broker status queries)
+CREATE INDEX IF NOT EXISTS idx_grove_contributors_status ON grove_contributors(grove_id, status);
+-- Index for templates scoped to a grove (used in grove-detail page)
+CREATE INDEX IF NOT EXISTS idx_templates_grove ON templates(grove_id) WHERE grove_id IS NOT NULL;
+-- Index for user access tokens by user (used in token listing)
+CREATE INDEX IF NOT EXISTS idx_user_access_tokens_user ON user_access_tokens(user_id, created_at DESC);
+`
+
+// Migration V42: Cost tracking columns for agents
+const migrationV42 = `
+ALTER TABLE agents ADD COLUMN input_tokens INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE agents ADD COLUMN output_tokens INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE agents ADD COLUMN total_tokens INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE agents ADD COLUMN cost_usd REAL NOT NULL DEFAULT 0;
+ALTER TABLE agents ADD COLUMN model_name TEXT;
+`
+
 // Helper functions for JSON marshaling/unmarshaling
 func marshalJSON(v interface{}) string {
 	if v == nil {
@@ -1044,7 +1114,7 @@ func (s *SQLiteStore) GetAgent(ctx context.Context, id string) (*store.Agent, er
 	var lastSeen, lastActivityEvent, deletedAt, startedAt sql.NullTime
 	var runtimeBrokerID, message, toolName, ancestry sql.NullString
 
-	err := s.db.QueryRowContext(ctx, `
+	err := s.ReadDB().QueryRowContext(ctx, `
 		SELECT id, agent_id, name, template, grove_id,
 			labels, annotations,
 			phase, activity, tool_name,
@@ -1110,7 +1180,7 @@ func (s *SQLiteStore) GetAgentBySlug(ctx context.Context, groveID, slug string) 
 	var lastSeen, lastActivityEvent, deletedAt, startedAt sql.NullTime
 	var runtimeBrokerID, message, toolName, ancestry sql.NullString
 
-	err := s.db.QueryRowContext(ctx, `
+	err := s.ReadDB().QueryRowContext(ctx, `
 		SELECT id, agent_id, name, template, grove_id,
 			labels, annotations,
 			phase, activity, tool_name,
@@ -1209,7 +1279,7 @@ func (s *SQLiteStore) UpdateAgent(ctx context.Context, agent *store.Agent) error
 	if rowsAffected == 0 {
 		// Check if agent exists
 		var exists bool
-		s.db.QueryRowContext(ctx, "SELECT 1 FROM agents WHERE id = ?", agent.ID).Scan(&exists)
+		s.ReadDB().QueryRowContext(ctx, "SELECT 1 FROM agents WHERE id = ?", agent.ID).Scan(&exists)
 		if !exists {
 			return store.ErrNotFound
 		}
@@ -1286,7 +1356,7 @@ func (s *SQLiteStore) ListAgents(ctx context.Context, filter store.AgentFilter, 
 	// Get total count
 	var totalCount int
 	countQuery := fmt.Sprintf("SELECT COUNT(*) FROM agents %s", whereClause)
-	if err := s.db.QueryRowContext(ctx, countQuery, args...).Scan(&totalCount); err != nil {
+	if err := s.ReadDB().QueryRowContext(ctx, countQuery, args...).Scan(&totalCount); err != nil {
 		return nil, err
 	}
 
@@ -1314,7 +1384,7 @@ func (s *SQLiteStore) ListAgents(ctx context.Context, filter store.AgentFilter, 
 	`, whereClause)
 	args = append(args, limit+1) // Fetch one extra to determine if there's a next page
 
-	rows, err := s.db.QueryContext(ctx, query, args...)
+	rows, err := s.ReadDB().QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -1724,7 +1794,7 @@ func (s *SQLiteStore) GetGrove(ctx context.Context, id string) (*store.Grove, er
 	var githubInstallationID sql.NullInt64
 	var githubPermissions, githubAppStatus, gitIdentity string
 
-	err := s.db.QueryRowContext(ctx, `
+	err := s.ReadDB().QueryRowContext(ctx, `
 		SELECT id, name, slug, git_remote, default_runtime_broker_id, labels, annotations, shared_dirs, created_at, updated_at, created_by, owner_id, visibility, github_installation_id, COALESCE(github_permissions, ''), COALESCE(github_app_status, ''), COALESCE(git_identity, '')
 		FROM groves WHERE id = ?
 	`, id).Scan(
@@ -1767,8 +1837,8 @@ func (s *SQLiteStore) GetGrove(ctx context.Context, id string) (*store.Grove, er
 	}
 
 	// Populate computed fields
-	s.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM agents WHERE grove_id = ?", id).Scan(&grove.AgentCount)
-	s.db.QueryRowContext(ctx, `
+	s.ReadDB().QueryRowContext(ctx, "SELECT COUNT(*) FROM agents WHERE grove_id = ?", id).Scan(&grove.AgentCount)
+	s.ReadDB().QueryRowContext(ctx, `
 		SELECT (SELECT COUNT(*) FROM grove_contributors WHERE grove_id = ? AND status = 'online')
 		     + (SELECT COUNT(*) FROM runtime_brokers WHERE auto_provide = 1 AND status = 'online'
 		            AND id NOT IN (SELECT broker_id FROM grove_contributors WHERE grove_id = ?))
@@ -1784,7 +1854,7 @@ func (s *SQLiteStore) GetGrove(ctx context.Context, id string) (*store.Grove, er
 func (s *SQLiteStore) populateGroveType(ctx context.Context, grove *store.Grove) {
 	// Check if any provider has a local_path not under ~/.scion/groves/ (i.e. broker-linked)
 	var linkedCount int
-	s.db.QueryRowContext(ctx,
+	s.ReadDB().QueryRowContext(ctx,
 		"SELECT COUNT(*) FROM grove_contributors WHERE grove_id = ? AND local_path != '' AND local_path NOT LIKE '%/.scion/groves/%'",
 		grove.ID).Scan(&linkedCount)
 	if linkedCount > 0 {
@@ -1796,7 +1866,7 @@ func (s *SQLiteStore) populateGroveType(ctx context.Context, grove *store.Grove)
 
 func (s *SQLiteStore) GetGroveBySlug(ctx context.Context, slug string) (*store.Grove, error) {
 	var id string
-	err := s.db.QueryRowContext(ctx, "SELECT id FROM groves WHERE slug = ?", slug).Scan(&id)
+	err := s.ReadDB().QueryRowContext(ctx, "SELECT id FROM groves WHERE slug = ?", slug).Scan(&id)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, store.ErrNotFound
@@ -1808,7 +1878,7 @@ func (s *SQLiteStore) GetGroveBySlug(ctx context.Context, slug string) (*store.G
 
 func (s *SQLiteStore) GetGroveBySlugCaseInsensitive(ctx context.Context, slug string) (*store.Grove, error) {
 	var id string
-	err := s.db.QueryRowContext(ctx, "SELECT id FROM groves WHERE LOWER(slug) = LOWER(?)", slug).Scan(&id)
+	err := s.ReadDB().QueryRowContext(ctx, "SELECT id FROM groves WHERE LOWER(slug) = LOWER(?)", slug).Scan(&id)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, store.ErrNotFound
@@ -1819,7 +1889,7 @@ func (s *SQLiteStore) GetGroveBySlugCaseInsensitive(ctx context.Context, slug st
 }
 
 func (s *SQLiteStore) GetGrovesByGitRemote(ctx context.Context, gitRemote string) ([]*store.Grove, error) {
-	rows, err := s.db.QueryContext(ctx, "SELECT id FROM groves WHERE git_remote = ? ORDER BY created_at ASC", gitRemote)
+	rows, err := s.ReadDB().QueryContext(ctx, "SELECT id FROM groves WHERE git_remote = ? ORDER BY created_at ASC", gitRemote)
 	if err != nil {
 		return nil, err
 	}
@@ -1855,7 +1925,7 @@ func (s *SQLiteStore) GetGrovesByGitRemote(ctx context.Context, gitRemote string
 func (s *SQLiteStore) NextAvailableSlug(ctx context.Context, baseSlug string) (string, error) {
 	// Check if the base slug is available
 	var count int
-	if err := s.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM groves WHERE slug = ?", baseSlug).Scan(&count); err != nil {
+	if err := s.ReadDB().QueryRowContext(ctx, "SELECT COUNT(*) FROM groves WHERE slug = ?", baseSlug).Scan(&count); err != nil {
 		return "", err
 	}
 	if count == 0 {
@@ -1865,7 +1935,7 @@ func (s *SQLiteStore) NextAvailableSlug(ctx context.Context, baseSlug string) (s
 	// Find the next available serial suffix
 	for i := 1; ; i++ {
 		candidate := fmt.Sprintf("%s-%d", baseSlug, i)
-		if err := s.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM groves WHERE slug = ?", candidate).Scan(&count); err != nil {
+		if err := s.ReadDB().QueryRowContext(ctx, "SELECT COUNT(*) FROM groves WHERE slug = ?", candidate).Scan(&count); err != nil {
 			return "", err
 		}
 		if count == 0 {
@@ -1971,7 +2041,7 @@ func (s *SQLiteStore) ListGroves(ctx context.Context, filter store.GroveFilter, 
 
 	var totalCount int
 	countQuery := fmt.Sprintf("SELECT COUNT(*) FROM groves %s", whereClause)
-	if err := s.db.QueryRowContext(ctx, countQuery, args...).Scan(&totalCount); err != nil {
+	if err := s.ReadDB().QueryRowContext(ctx, countQuery, args...).Scan(&totalCount); err != nil {
 		return nil, err
 	}
 
@@ -1987,7 +2057,7 @@ func (s *SQLiteStore) ListGroves(ctx context.Context, filter store.GroveFilter, 
 	`, whereClause)
 	args = append(args, limit)
 
-	rows, err := s.db.QueryContext(ctx, query, args...)
+	rows, err := s.ReadDB().QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -2051,8 +2121,8 @@ func (s *SQLiteStore) ListGroves(ctx context.Context, filter store.GroveFilter, 
 		}
 
 		// Populate computed fields - these now have a connection available
-		s.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM agents WHERE grove_id = ?", grove.ID).Scan(&grove.AgentCount)
-		s.db.QueryRowContext(ctx, `
+		s.ReadDB().QueryRowContext(ctx, "SELECT COUNT(*) FROM agents WHERE grove_id = ?", grove.ID).Scan(&grove.AgentCount)
+		s.ReadDB().QueryRowContext(ctx, `
 			SELECT (SELECT COUNT(*) FROM grove_contributors WHERE grove_id = ? AND status = 'online')
 			     + (SELECT COUNT(*) FROM runtime_brokers WHERE auto_provide = 1 AND status = 'online'
 			            AND id NOT IN (SELECT broker_id FROM grove_contributors WHERE grove_id = ?))
@@ -2109,7 +2179,7 @@ func (s *SQLiteStore) GetRuntimeBroker(ctx context.Context, id string) (*store.R
 	var lastHeartbeat sql.NullTime
 	var createdBy sql.NullString
 
-	err := s.db.QueryRowContext(ctx, `
+	err := s.ReadDB().QueryRowContext(ctx, `
 		SELECT id, name, slug, type, mode, version,
 			status, connection_state, last_heartbeat,
 			capabilities, supported_harnesses, resources, runtimes,
@@ -2146,7 +2216,7 @@ func (s *SQLiteStore) GetRuntimeBroker(ctx context.Context, id string) (*store.R
 
 func (s *SQLiteStore) GetRuntimeBrokerByName(ctx context.Context, name string) (*store.RuntimeBroker, error) {
 	var id string
-	err := s.db.QueryRowContext(ctx, "SELECT id FROM runtime_brokers WHERE LOWER(name) = LOWER(?)", name).Scan(&id)
+	err := s.ReadDB().QueryRowContext(ctx, "SELECT id FROM runtime_brokers WHERE LOWER(name) = LOWER(?)", name).Scan(&id)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, store.ErrNotFound
@@ -2233,7 +2303,7 @@ func (s *SQLiteStore) ListRuntimeBrokers(ctx context.Context, filter store.Runti
 
 	var totalCount int
 	countQuery := fmt.Sprintf("SELECT COUNT(*) FROM runtime_brokers %s", whereClause)
-	if err := s.db.QueryRowContext(ctx, countQuery, args...).Scan(&totalCount); err != nil {
+	if err := s.ReadDB().QueryRowContext(ctx, countQuery, args...).Scan(&totalCount); err != nil {
 		return nil, err
 	}
 
@@ -2252,7 +2322,7 @@ func (s *SQLiteStore) ListRuntimeBrokers(ctx context.Context, filter store.Runti
 	`, whereClause)
 	args = append(args, limit)
 
-	rows, err := s.db.QueryContext(ctx, query, args...)
+	rows, err := s.ReadDB().QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -2368,7 +2438,7 @@ func (s *SQLiteStore) GetTemplate(ctx context.Context, id string) (*store.Templa
 	var storageURI, storageBucket, storagePath, baseTemplate sql.NullString
 	var createdBy, updatedBy, ownerID, visibility sql.NullString
 
-	err := s.db.QueryRowContext(ctx, `
+	err := s.ReadDB().QueryRowContext(ctx, `
 		SELECT id, name, slug, display_name, description, harness, image, config,
 			content_hash, scope, scope_id, grove_id,
 			storage_uri, storage_bucket, storage_path, files,
@@ -2443,11 +2513,11 @@ func (s *SQLiteStore) GetTemplateBySlug(ctx context.Context, slug, scope, scopeI
 
 	if scope == "grove" && scopeID != "" {
 		// Try scope_id first, then fall back to grove_id for backwards compatibility
-		err = s.db.QueryRowContext(ctx, "SELECT id FROM templates WHERE slug = ? AND scope = ? AND (scope_id = ? OR grove_id = ?)", slug, scope, scopeID, scopeID).Scan(&id)
+		err = s.ReadDB().QueryRowContext(ctx, "SELECT id FROM templates WHERE slug = ? AND scope = ? AND (scope_id = ? OR grove_id = ?)", slug, scope, scopeID, scopeID).Scan(&id)
 	} else if scope == "user" && scopeID != "" {
-		err = s.db.QueryRowContext(ctx, "SELECT id FROM templates WHERE slug = ? AND scope = ? AND scope_id = ?", slug, scope, scopeID).Scan(&id)
+		err = s.ReadDB().QueryRowContext(ctx, "SELECT id FROM templates WHERE slug = ? AND scope = ? AND scope_id = ?", slug, scope, scopeID).Scan(&id)
 	} else {
-		err = s.db.QueryRowContext(ctx, "SELECT id FROM templates WHERE slug = ? AND scope = ?", slug, scope).Scan(&id)
+		err = s.ReadDB().QueryRowContext(ctx, "SELECT id FROM templates WHERE slug = ? AND scope = ?", slug, scope).Scan(&id)
 	}
 
 	if err != nil {
@@ -2573,7 +2643,7 @@ func (s *SQLiteStore) ListTemplates(ctx context.Context, filter store.TemplateFi
 
 	var totalCount int
 	countQuery := fmt.Sprintf("SELECT COUNT(*) FROM templates %s", whereClause)
-	if err := s.db.QueryRowContext(ctx, countQuery, args...).Scan(&totalCount); err != nil {
+	if err := s.ReadDB().QueryRowContext(ctx, countQuery, args...).Scan(&totalCount); err != nil {
 		return nil, err
 	}
 
@@ -2593,7 +2663,7 @@ func (s *SQLiteStore) ListTemplates(ctx context.Context, filter store.TemplateFi
 	`, whereClause)
 	args = append(args, limit)
 
-	rows, err := s.db.QueryContext(ctx, query, args...)
+	rows, err := s.ReadDB().QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -2717,7 +2787,7 @@ func (s *SQLiteStore) GetHarnessConfig(ctx context.Context, id string) (*store.H
 	var storageURI, storageBucket, storagePath sql.NullString
 	var createdBy, updatedBy, ownerID, visibility sql.NullString
 
-	err := s.db.QueryRowContext(ctx, `
+	err := s.ReadDB().QueryRowContext(ctx, `
 		SELECT id, name, slug, display_name, description, harness, config,
 			content_hash, scope, scope_id,
 			storage_uri, storage_bucket, storage_path, files,
@@ -2785,9 +2855,9 @@ func (s *SQLiteStore) GetHarnessConfigBySlug(ctx context.Context, slug, scope, s
 	var err error
 
 	if scopeID != "" {
-		err = s.db.QueryRowContext(ctx, "SELECT id FROM harness_configs WHERE slug = ? AND scope = ? AND scope_id = ?", slug, scope, scopeID).Scan(&id)
+		err = s.ReadDB().QueryRowContext(ctx, "SELECT id FROM harness_configs WHERE slug = ? AND scope = ? AND scope_id = ?", slug, scope, scopeID).Scan(&id)
 	} else {
-		err = s.db.QueryRowContext(ctx, "SELECT id FROM harness_configs WHERE slug = ? AND scope = ?", slug, scope).Scan(&id)
+		err = s.ReadDB().QueryRowContext(ctx, "SELECT id FROM harness_configs WHERE slug = ? AND scope = ?", slug, scope).Scan(&id)
 	}
 
 	if err != nil {
@@ -2908,7 +2978,7 @@ func (s *SQLiteStore) ListHarnessConfigs(ctx context.Context, filter store.Harne
 
 	var totalCount int
 	countQuery := fmt.Sprintf("SELECT COUNT(*) FROM harness_configs %s", whereClause)
-	if err := s.db.QueryRowContext(ctx, countQuery, args...).Scan(&totalCount); err != nil {
+	if err := s.ReadDB().QueryRowContext(ctx, countQuery, args...).Scan(&totalCount); err != nil {
 		return nil, err
 	}
 
@@ -2928,7 +2998,7 @@ func (s *SQLiteStore) ListHarnessConfigs(ctx context.Context, filter store.Harne
 	`, whereClause)
 	args = append(args, limit)
 
-	rows, err := s.db.QueryContext(ctx, query, args...)
+	rows, err := s.ReadDB().QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -3028,7 +3098,7 @@ func (s *SQLiteStore) GetUser(ctx context.Context, id string) (*store.User, erro
 	var preferences string
 	var lastLogin, lastSeen sql.NullTime
 
-	err := s.db.QueryRowContext(ctx, `
+	err := s.ReadDB().QueryRowContext(ctx, `
 		SELECT id, email, display_name, avatar_url, role, status, preferences, created_at, last_login, last_seen
 		FROM users WHERE id = ?
 	`, id).Scan(
@@ -3055,7 +3125,7 @@ func (s *SQLiteStore) GetUser(ctx context.Context, id string) (*store.User, erro
 
 func (s *SQLiteStore) GetUserByEmail(ctx context.Context, email string) (*store.User, error) {
 	var id string
-	err := s.db.QueryRowContext(ctx, "SELECT id FROM users WHERE email = ?", email).Scan(&id)
+	err := s.ReadDB().QueryRowContext(ctx, "SELECT id FROM users WHERE email = ?", email).Scan(&id)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, store.ErrNotFound
@@ -3135,7 +3205,7 @@ func (s *SQLiteStore) ListUsers(ctx context.Context, filter store.UserFilter, op
 
 	var totalCount int
 	countQuery := fmt.Sprintf("SELECT COUNT(*) FROM users %s", whereClause)
-	if err := s.db.QueryRowContext(ctx, countQuery, args...).Scan(&totalCount); err != nil {
+	if err := s.ReadDB().QueryRowContext(ctx, countQuery, args...).Scan(&totalCount); err != nil {
 		return nil, err
 	}
 
@@ -3161,7 +3231,7 @@ func (s *SQLiteStore) ListUsers(ctx context.Context, filter store.UserFilter, op
 	`, whereClause)
 	args = append(args, limit+1, offset)
 
-	rows, err := s.db.QueryContext(ctx, query, args...)
+	rows, err := s.ReadDB().QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -3247,7 +3317,7 @@ func (s *SQLiteStore) GetGroveProvider(ctx context.Context, groveID, brokerID st
 	var providerMode, profiles string // unused columns kept for schema compat
 	var lastSeen, linkedAt sql.NullTime
 
-	err := s.db.QueryRowContext(ctx, `
+	err := s.ReadDB().QueryRowContext(ctx, `
 		SELECT grove_id, broker_id, broker_name, local_path, mode, status, profiles, last_seen, linked_by, linked_at
 		FROM grove_contributors WHERE grove_id = ? AND broker_id = ?
 	`, groveID, brokerID).Scan(
@@ -3279,7 +3349,7 @@ func (s *SQLiteStore) GetGroveProvider(ctx context.Context, groveID, brokerID st
 }
 
 func (s *SQLiteStore) GetGroveProviders(ctx context.Context, groveID string) ([]store.GroveProvider, error) {
-	rows, err := s.db.QueryContext(ctx, `
+	rows, err := s.ReadDB().QueryContext(ctx, `
 		SELECT grove_id, broker_id, broker_name, local_path, mode, status, profiles, last_seen, linked_by, linked_at
 		FROM grove_contributors WHERE grove_id = ?
 	`, groveID)
@@ -3323,7 +3393,7 @@ func (s *SQLiteStore) GetGroveProviders(ctx context.Context, groveID string) ([]
 }
 
 func (s *SQLiteStore) GetBrokerGroves(ctx context.Context, brokerID string) ([]store.GroveProvider, error) {
-	rows, err := s.db.QueryContext(ctx, `
+	rows, err := s.ReadDB().QueryContext(ctx, `
 		SELECT grove_id, broker_id, broker_name, local_path, mode, status, profiles, last_seen, linked_by, linked_at
 		FROM grove_contributors WHERE broker_id = ?
 	`, brokerID)
@@ -3415,7 +3485,7 @@ func (s *SQLiteStore) CreateEnvVar(ctx context.Context, envVar *store.EnvVar) er
 func (s *SQLiteStore) GetEnvVar(ctx context.Context, key, scope, scopeID string) (*store.EnvVar, error) {
 	envVar := &store.EnvVar{}
 
-	err := s.db.QueryRowContext(ctx, `
+	err := s.ReadDB().QueryRowContext(ctx, `
 		SELECT id, key, value, scope, scope_id, description, sensitive, injection_mode, secret, created_at, updated_at, created_by
 		FROM env_vars WHERE key = ? AND scope = ? AND scope_id = ?
 	`, key, scope, scopeID).Scan(
@@ -3541,7 +3611,7 @@ func (s *SQLiteStore) ListEnvVars(ctx context.Context, filter store.EnvVarFilter
 		FROM env_vars %s ORDER BY key
 	`, whereClause)
 
-	rows, err := s.db.QueryContext(ctx, query, args...)
+	rows, err := s.ReadDB().QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -3607,7 +3677,7 @@ func (s *SQLiteStore) GetSecret(ctx context.Context, key, scope, scopeID string)
 	var target sql.NullString
 	var secretRef sql.NullString
 
-	err := s.db.QueryRowContext(ctx, `
+	err := s.ReadDB().QueryRowContext(ctx, `
 		SELECT id, key, encrypted_value, secret_ref, secret_type, COALESCE(target, key), scope, scope_id, description, injection_mode, version, created_at, updated_at, created_by, updated_by
 		FROM secrets WHERE key = ? AND scope = ? AND scope_id = ?
 	`, key, scope, scopeID).Scan(
@@ -3761,7 +3831,7 @@ func (s *SQLiteStore) ListSecrets(ctx context.Context, filter store.SecretFilter
 		FROM secrets %s ORDER BY key
 	`, whereClause)
 
-	rows, err := s.db.QueryContext(ctx, query, args...)
+	rows, err := s.ReadDB().QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -3795,7 +3865,7 @@ func (s *SQLiteStore) ListSecrets(ctx context.Context, filter store.SecretFilter
 func (s *SQLiteStore) GetSecretValue(ctx context.Context, key, scope, scopeID string) (string, error) {
 	var encryptedValue string
 
-	err := s.db.QueryRowContext(ctx, `
+	err := s.ReadDB().QueryRowContext(ctx, `
 		SELECT encrypted_value FROM secrets WHERE key = ? AND scope = ? AND scope_id = ?
 	`, key, scope, scopeID).Scan(&encryptedValue)
 	if err != nil {
@@ -3844,7 +3914,7 @@ func (s *SQLiteStore) GetGroup(ctx context.Context, id string) (*store.Group, er
 	var labels, annotations string
 	var parentID, groveID sql.NullString
 
-	err := s.db.QueryRowContext(ctx, `
+	err := s.ReadDB().QueryRowContext(ctx, `
 		SELECT id, name, slug, description, group_type, grove_id, parent_id, labels, annotations, created_at, updated_at, created_by, owner_id
 		FROM groups WHERE id = ?
 	`, id).Scan(
@@ -3878,7 +3948,7 @@ func (s *SQLiteStore) GetGroup(ctx context.Context, id string) (*store.Group, er
 
 func (s *SQLiteStore) GetGroupBySlug(ctx context.Context, slug string) (*store.Group, error) {
 	var id string
-	err := s.db.QueryRowContext(ctx, "SELECT id FROM groups WHERE slug = ?", slug).Scan(&id)
+	err := s.ReadDB().QueryRowContext(ctx, "SELECT id FROM groups WHERE slug = ?", slug).Scan(&id)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, store.ErrNotFound
@@ -3962,7 +4032,7 @@ func (s *SQLiteStore) ListGroups(ctx context.Context, filter store.GroupFilter, 
 
 	var totalCount int
 	countQuery := fmt.Sprintf("SELECT COUNT(*) FROM groups %s", whereClause)
-	if err := s.db.QueryRowContext(ctx, countQuery, args...).Scan(&totalCount); err != nil {
+	if err := s.ReadDB().QueryRowContext(ctx, countQuery, args...).Scan(&totalCount); err != nil {
 		return nil, err
 	}
 
@@ -3977,7 +4047,7 @@ func (s *SQLiteStore) ListGroups(ctx context.Context, filter store.GroupFilter, 
 	`, whereClause)
 	args = append(args, limit)
 
-	rows, err := s.db.QueryContext(ctx, query, args...)
+	rows, err := s.ReadDB().QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -4074,7 +4144,7 @@ func (s *SQLiteStore) RemoveGroupMember(ctx context.Context, groupID, memberType
 }
 
 func (s *SQLiteStore) GetGroupMembers(ctx context.Context, groupID string) ([]store.GroupMember, error) {
-	rows, err := s.db.QueryContext(ctx, `
+	rows, err := s.ReadDB().QueryContext(ctx, `
 		SELECT group_id, member_type, member_id, role, added_at, added_by
 		FROM group_members WHERE group_id = ?
 	`, groupID)
@@ -4098,7 +4168,7 @@ func (s *SQLiteStore) GetGroupMembers(ctx context.Context, groupID string) ([]st
 }
 
 func (s *SQLiteStore) GetUserGroups(ctx context.Context, userID string) ([]store.GroupMember, error) {
-	rows, err := s.db.QueryContext(ctx, `
+	rows, err := s.ReadDB().QueryContext(ctx, `
 		SELECT group_id, member_type, member_id, role, added_at, added_by
 		FROM group_members WHERE member_type = 'user' AND member_id = ?
 	`, userID)
@@ -4124,7 +4194,7 @@ func (s *SQLiteStore) GetUserGroups(ctx context.Context, userID string) ([]store
 func (s *SQLiteStore) GetGroupMembership(ctx context.Context, groupID, memberType, memberID string) (*store.GroupMember, error) {
 	member := &store.GroupMember{}
 
-	err := s.db.QueryRowContext(ctx, `
+	err := s.ReadDB().QueryRowContext(ctx, `
 		SELECT group_id, member_type, member_id, role, added_at, added_by
 		FROM group_members WHERE group_id = ? AND member_type = ? AND member_id = ?
 	`, groupID, memberType, memberID).Scan(
@@ -4167,7 +4237,7 @@ func (s *SQLiteStore) hasPathDown(ctx context.Context, current, target string, v
 	visited[current] = true
 
 	// Get all groups that 'current' contains (groups where current is the group_id)
-	rows, err := s.db.QueryContext(ctx,
+	rows, err := s.ReadDB().QueryContext(ctx,
 		"SELECT member_id FROM group_members WHERE member_type = 'group' AND group_id = ?", current)
 	if err != nil {
 		return false, err
@@ -4219,7 +4289,7 @@ func (s *SQLiteStore) GetEffectiveGroups(ctx context.Context, userID string) ([]
 // addTransitiveGroups recursively adds all groups that contain the given group.
 func (s *SQLiteStore) addTransitiveGroups(ctx context.Context, groupID string, visited map[string]bool) error {
 	// Find all groups where this group is a member
-	rows, err := s.db.QueryContext(ctx,
+	rows, err := s.ReadDB().QueryContext(ctx,
 		"SELECT group_id FROM group_members WHERE member_type = 'group' AND member_id = ?", groupID)
 	if err != nil {
 		return err
@@ -4254,7 +4324,7 @@ func (s *SQLiteStore) addTransitiveGroups(ctx context.Context, groupID string, v
 // GetGroupByGroveID retrieves the grove_agents group associated with a grove.
 func (s *SQLiteStore) GetGroupByGroveID(ctx context.Context, groveID string) (*store.Group, error) {
 	var id string
-	err := s.db.QueryRowContext(ctx, "SELECT id FROM groups WHERE grove_id = ? AND group_type = ? LIMIT 1",
+	err := s.ReadDB().QueryRowContext(ctx, "SELECT id FROM groups WHERE grove_id = ? AND group_type = ? LIMIT 1",
 		groveID, store.GroupTypeGroveAgents).Scan(&id)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -4284,7 +4354,7 @@ func (s *SQLiteStore) GetGroupsByIDs(ctx context.Context, ids []string) ([]store
 
 func (s *SQLiteStore) CountGroupMembersByRole(ctx context.Context, groupID, role string) (int, error) {
 	var count int
-	err := s.db.QueryRowContext(ctx,
+	err := s.ReadDB().QueryRowContext(ctx,
 		`SELECT COUNT(*) FROM group_members WHERE group_id = ? AND role = ?`,
 		groupID, role,
 	).Scan(&count)
@@ -4326,7 +4396,7 @@ func (s *SQLiteStore) GetPolicy(ctx context.Context, id string) (*store.Policy, 
 	policy := &store.Policy{}
 	var actions, conditions, labels, annotations string
 
-	err := s.db.QueryRowContext(ctx, `
+	err := s.ReadDB().QueryRowContext(ctx, `
 		SELECT id, name, description, scope_type, scope_id, resource_type, resource_id, actions, effect, conditions, priority, labels, annotations, created_at, updated_at, created_by
 		FROM policies WHERE id = ?
 	`, id).Scan(
@@ -4431,7 +4501,7 @@ func (s *SQLiteStore) ListPolicies(ctx context.Context, filter store.PolicyFilte
 
 	var totalCount int
 	countQuery := fmt.Sprintf("SELECT COUNT(*) FROM policies %s", whereClause)
-	if err := s.db.QueryRowContext(ctx, countQuery, args...).Scan(&totalCount); err != nil {
+	if err := s.ReadDB().QueryRowContext(ctx, countQuery, args...).Scan(&totalCount); err != nil {
 		return nil, err
 	}
 
@@ -4446,7 +4516,7 @@ func (s *SQLiteStore) ListPolicies(ctx context.Context, filter store.PolicyFilte
 	`, whereClause)
 	args = append(args, limit)
 
-	rows, err := s.db.QueryContext(ctx, query, args...)
+	rows, err := s.ReadDB().QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -4516,7 +4586,7 @@ func (s *SQLiteStore) RemovePolicyBinding(ctx context.Context, policyID, princip
 }
 
 func (s *SQLiteStore) GetPolicyBindings(ctx context.Context, policyID string) ([]store.PolicyBinding, error) {
-	rows, err := s.db.QueryContext(ctx, `
+	rows, err := s.ReadDB().QueryContext(ctx, `
 		SELECT policy_id, principal_type, principal_id
 		FROM policy_bindings WHERE policy_id = ?
 	`, policyID)
@@ -4538,7 +4608,7 @@ func (s *SQLiteStore) GetPolicyBindings(ctx context.Context, policyID string) ([
 }
 
 func (s *SQLiteStore) GetPoliciesForPrincipal(ctx context.Context, principalType, principalID string) ([]store.Policy, error) {
-	rows, err := s.db.QueryContext(ctx, `
+	rows, err := s.ReadDB().QueryContext(ctx, `
 		SELECT p.id, p.name, p.description, p.scope_type, p.scope_id, p.resource_type, p.resource_id, p.actions, p.effect, p.conditions, p.priority, p.labels, p.annotations, p.created_at, p.updated_at, p.created_by
 		FROM policies p
 		INNER JOIN policy_bindings pb ON p.id = pb.policy_id
@@ -4599,7 +4669,7 @@ func (s *SQLiteStore) GetPoliciesForPrincipals(ctx context.Context, principals [
 			p.priority ASC
 	`
 
-	rows, err := s.db.QueryContext(ctx, query, args...)
+	rows, err := s.ReadDB().QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -4663,7 +4733,7 @@ func (s *SQLiteStore) GetUserAccessToken(ctx context.Context, id string) (*store
 	var scopes string
 	var expiresAt, lastUsed sql.NullTime
 
-	err := s.db.QueryRowContext(ctx, `
+	err := s.ReadDB().QueryRowContext(ctx, `
 		SELECT id, user_id, name, prefix, key_hash, grove_id, scopes,
 			revoked, expires_at, last_used, created_at
 		FROM user_access_tokens WHERE id = ?
@@ -4694,7 +4764,7 @@ func (s *SQLiteStore) GetUserAccessTokenByHash(ctx context.Context, hash string)
 	var scopes string
 	var expiresAt, lastUsed sql.NullTime
 
-	err := s.db.QueryRowContext(ctx, `
+	err := s.ReadDB().QueryRowContext(ctx, `
 		SELECT id, user_id, name, prefix, key_hash, grove_id, scopes,
 			revoked, expires_at, last_used, created_at
 		FROM user_access_tokens WHERE key_hash = ?
@@ -4761,7 +4831,7 @@ func (s *SQLiteStore) DeleteUserAccessToken(ctx context.Context, id string) erro
 }
 
 func (s *SQLiteStore) ListUserAccessTokens(ctx context.Context, userID string) ([]store.UserAccessToken, error) {
-	rows, err := s.db.QueryContext(ctx, `
+	rows, err := s.ReadDB().QueryContext(ctx, `
 		SELECT id, user_id, name, prefix, grove_id, scopes,
 			revoked, expires_at, last_used, created_at
 		FROM user_access_tokens WHERE user_id = ?
@@ -4800,7 +4870,7 @@ func (s *SQLiteStore) ListUserAccessTokens(ctx context.Context, userID string) (
 
 func (s *SQLiteStore) CountUserAccessTokens(ctx context.Context, userID string) (int, error) {
 	var count int
-	err := s.db.QueryRowContext(ctx,
+	err := s.ReadDB().QueryRowContext(ctx,
 		"SELECT COUNT(*) FROM user_access_tokens WHERE user_id = ? AND revoked = 0",
 		userID,
 	).Scan(&count)
