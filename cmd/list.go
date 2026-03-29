@@ -31,6 +31,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubsync"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
+	"github.com/GoogleCloudPlatform/scion/pkg/util"
 	"github.com/spf13/cobra"
 )
 
@@ -301,6 +302,9 @@ func displayAgents(agents []api.AgentInfo, all bool, hubMode bool) error {
 			fmt.Println("No active agents found across any groves.")
 		} else {
 			fmt.Println("No active agents found in the current grove.")
+			fmt.Printf("\n  %sGet started:%s scion start my-agent \"your task here\" --attach\n", util.Bold, util.Reset)
+			fmt.Printf("  %sBrowse templates:%s scion templates list\n", util.Bold, util.Reset)
+			fmt.Printf("  %sInstall tools:%s scion marketplace list\n\n", util.Bold, util.Reset)
 		}
 		return nil
 	}

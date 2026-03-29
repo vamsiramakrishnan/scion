@@ -41,12 +41,22 @@ RBAC permissions, and CSI driver availability.`,
 	},
 }
 
+var doctorFix bool
+
 func init() {
 	rootCmd.AddCommand(doctorCmd)
+	doctorCmd.Flags().BoolVar(&doctorFix, "fix", false, "Attempt to automatically fix issues found")
 }
 
 func runDoctor() error {
 	fmt.Printf("%sScion Doctor%s\n\n", util.Bold, util.Reset)
+
+	// Configuration checks (before system checks)
+	if doctorFix {
+		fmt.Printf("%sConfiguration (auto-fix enabled)%s\n", util.Bold, util.Reset)
+		runDoctorFixes()
+		fmt.Println()
+	}
 
 	// General checks
 	fmt.Printf("%sGeneral%s\n", util.Bold, util.Reset)
@@ -257,4 +267,86 @@ func trimNewline(s string) string {
 		return s[:len(s)-1]
 	}
 	return s
+}
+
+// runDoctorFixes attempts to auto-remediate common configuration issues.
+func runDoctorFixes() {
+	globalDir, err := config.GetGlobalDir()
+	if err != nil {
+		printCheck("global-dir", "fail", "Cannot determine global directory", err.Error())
+		return
+	}
+
+	// Check machine init
+	if _, err := os.Stat(globalDir); os.IsNotExist(err) {
+		printCheck("machine-init", "warn", "Machine not initialized", "")
+		fmt.Printf("    Fixing: running machine init...\n")
+		if initErr := config.InitMachine(nil, config.InitMachineOpts{}); initErr != nil {
+			printCheck("machine-init", "fail", "Auto-fix failed", initErr.Error())
+		} else {
+			printCheck("machine-init", "pass", "Machine initialized", "")
+		}
+	} else {
+		printCheck("machine-init", "pass", "Machine initialized", "")
+	}
+
+	// Check image registry
+	if vs, _, err := config.LoadEffectiveSettings(globalDir); err == nil && vs != nil {
+		if vs.ResolveImageRegistry("") == "" {
+			printCheck("image-registry", "warn", "Image registry not configured", "Run: scion config set --global image_registry <registry>")
+		} else {
+			printCheck("image-registry", "pass", fmt.Sprintf("Image registry: %s", vs.ResolveImageRegistry("")), "")
+		}
+	}
+
+	// Check credentials
+	foundCreds := false
+	for _, env := range []string{"ANTHROPIC_API_KEY", "GEMINI_API_KEY", "OPENAI_API_KEY"} {
+		if os.Getenv(env) != "" {
+			foundCreds = true
+			break
+		}
+	}
+	if home, _ := os.UserHomeDir(); home != "" {
+		if _, err := os.Stat(home + "/.config/gcloud/application_default_credentials.json"); err == nil {
+			foundCreds = true
+		}
+	}
+	if foundCreds {
+		printCheck("credentials", "pass", "API credentials found", "")
+	} else {
+		printCheck("credentials", "warn", "No API credentials detected", "Export ANTHROPIC_API_KEY, GEMINI_API_KEY, or OPENAI_API_KEY")
+	}
+
+	// Check grove
+	if _, ok := config.FindProjectRoot(); ok {
+		printCheck("grove", "pass", "In a grove context", "")
+	} else {
+		printCheck("grove", "warn", "Not in a grove", "Run: scion init")
+	}
+
+	// Check shell completions
+	shell := os.Getenv("SHELL")
+	if shell != "" {
+		home, _ := os.UserHomeDir()
+		completionExists := false
+		if home != "" {
+			paths := []string{
+				home + "/.zsh/completions/_scion",
+				home + "/.local/share/bash-completion/completions/scion",
+				home + "/.config/fish/completions/scion.fish",
+			}
+			for _, p := range paths {
+				if _, err := os.Stat(p); err == nil {
+					completionExists = true
+					break
+				}
+			}
+		}
+		if completionExists {
+			printCheck("completions", "pass", "Shell completions installed", "")
+		} else {
+			printCheck("completions", "warn", "Shell completions not found", "Run: scion quickstart (installs automatically)")
+		}
+	}
 }

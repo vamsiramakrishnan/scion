@@ -293,6 +293,10 @@ func installMCPServer(item *config.MarketplaceItem, templateDir string) error {
 		installMCPServerGemini(item, geminiSettingsPath)
 	}
 
+	// Generate Gemini extension manifest (gemini-extension.json)
+	geminiExtDir := filepath.Join(templateDir, "home", ".gemini", "extensions", item.Name)
+	installGeminiExtensionManifest(item, geminiExtDir)
+
 	if len(item.RequiredEnv) > 0 {
 		fmt.Printf("\n%sRequired environment variables:%s\n", util.Bold, util.Reset)
 		for _, env := range item.RequiredEnv {
@@ -303,6 +307,41 @@ func installMCPServer(item *config.MarketplaceItem, templateDir string) error {
 		}
 	}
 	return nil
+}
+
+// installGeminiExtensionManifest generates a Gemini CLI extension manifest.
+// Gemini CLI natively supports extensions in ~/.gemini/extensions/<name>/gemini-extension.json.
+func installGeminiExtensionManifest(item *config.MarketplaceItem, extDir string) {
+	if item.MCPConfig == nil {
+		return
+	}
+
+	manifest := map[string]interface{}{
+		"name":    item.Name,
+		"version": "1.0.0",
+		"mcpServers": map[string]interface{}{
+			item.Name: map[string]interface{}{
+				"type":    "stdio",
+				"command": item.MCPConfig.Command,
+				"args":    item.MCPConfig.Args,
+			},
+		},
+	}
+	if len(item.MCPConfig.Env) > 0 {
+		mcpServers := manifest["mcpServers"].(map[string]interface{})
+		serverCfg := mcpServers[item.Name].(map[string]interface{})
+		serverCfg["env"] = item.MCPConfig.Env
+	}
+
+	os.MkdirAll(extDir, 0755)
+	data, err := json.MarshalIndent(manifest, "", "  ")
+	if err != nil {
+		return
+	}
+	if err := os.WriteFile(filepath.Join(extDir, "gemini-extension.json"), data, 0644); err != nil {
+		return
+	}
+	fmt.Printf("%s%s  Generated Gemini extension manifest for %q%s\n", util.Bold, util.Green, item.Name, util.Reset)
 }
 
 // installMCPServerGemini adds an MCP server to Gemini's settings.json.

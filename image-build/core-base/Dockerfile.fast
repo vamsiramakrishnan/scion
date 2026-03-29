@@ -1,0 +1,91 @@
+# syntax=docker/dockerfile:1
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Fast Core Base Image — uses pre-built Go binary and pre-compiled Git PPA
+# instead of compiling from source. Build time: ~3 minutes (vs ~15 minutes).
+#
+# Trade-offs:
+# - Requires network access to PPA (git-core/ppa) for Git >= 2.47
+# - Ubuntu 24.04 base instead of Debian slim (slightly larger)
+# - Same functionality, ~5x faster build
+#
+# Usage:
+#   docker build -f Dockerfile.fast -t core-base:latest .
+#   OR set CORE_BASE_DOCKERFILE=Dockerfile.fast in build-images.sh
+
+FROM oven/bun:latest AS bun-source
+
+FROM ubuntu:24.04 AS builder
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Install Go from official binary (not compiled from source)
+ARG GO_VERSION=1.26.1
+RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates && \
+    ARCH=$(dpkg --print-architecture) && \
+    curl -fsSL "https://go.dev/dl/go${GO_VERSION}.linux-${ARCH}.tar.gz" | tar -C /usr/local -xz && \
+    rm -rf /var/lib/apt/lists/*
+
+# Download signing keys
+RUN apt-get update && apt-get install -y --no-install-recommends wget gnupg software-properties-common && \
+    mkdir -p -m 755 /etc/apt/keyrings && \
+    wget -qO- https://cli.github.com/packages/githubcli-archive-keyring.gpg > /etc/apt/keyrings/githubcli-archive-keyring.gpg && \
+    rm -rf /var/lib/apt/lists/*
+
+# Final stage — Ubuntu 24.04 with Git from PPA (>= 2.47)
+FROM ubuntu:24.04
+USER root
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Add Git PPA for >= 2.47 (Ubuntu 24.04 ships 2.43, we need >= 2.47 for worktrees)
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends software-properties-common && \
+    add-apt-repository -y ppa:git-core/ppa && \
+    rm -rf /var/lib/apt/lists/*
+
+# Copy signing keys from builder
+COPY --from=builder /etc/apt/keyrings/githubcli-archive-keyring.gpg /etc/apt/keyrings/githubcli-archive-keyring.gpg
+RUN echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" > /etc/apt/sources.list.d/github-cli.list
+
+# Install all runtime dependencies in a single layer
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    git \
+    tmux \
+    ca-certificates \
+    python3 \
+    make \
+    g++ \
+    nodejs \
+    npm \
+    curl \
+    wget \
+    less \
+    jq \
+    bc \
+    vim-tiny \
+    sudo \
+    openssh-client \
+    gh \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy Go
+COPY --from=builder /usr/local/go /usr/local/go
+ENV PATH="/usr/local/go/bin:${PATH}"
+
+# Copy Bun
+COPY --from=bun-source /usr/local/bin/bun /usr/local/bin/bun
+COPY --from=bun-source /usr/local/bin/bunx /usr/local/bin/bunx
+
+# Verify critical tools
+RUN git --version && go version && node --version && echo "Core base ready"
