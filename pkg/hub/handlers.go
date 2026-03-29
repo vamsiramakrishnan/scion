@@ -3613,6 +3613,14 @@ func (s *Server) handleGroveRoutes(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Check for nested /tasks path
+	if strings.HasPrefix(subPath, "tasks") {
+		taskPath := strings.TrimPrefix(subPath, "tasks")
+		taskPath = strings.TrimPrefix(taskPath, "/")
+		s.handleTasks(w, r, groveID, taskPath)
+		return
+	}
+
 	// Check for nested /settings path
 	if subPath == "settings" {
 		s.handleGroveSettings(w, r, groveID)
@@ -3666,6 +3674,20 @@ func (s *Server) handleGroveRoutes(w http.ResponseWriter, r *http.Request) {
 	// Check for nested /git-identity path
 	if subPath == "git-identity" {
 		s.handleGroveGitIdentity(w, r, groveID)
+		return
+	}
+
+	// Check for nested /tasks path (multi-agent task coordination)
+	if strings.HasPrefix(subPath, "tasks") {
+		taskPath := strings.TrimPrefix(subPath, "tasks")
+		taskPath = strings.TrimPrefix(taskPath, "/")
+		s.handleTasks(w, r, groveID, taskPath)
+		return
+	}
+
+	// Check for nested /cost-summary path
+	if subPath == "cost-summary" {
+		s.handleCostSummary(w, r)
 		return
 	}
 

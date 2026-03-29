@@ -105,6 +105,8 @@ type AgentLauncher interface {
 	WaitForAgent(ctx context.Context, agentID string) (string, error)
 	// StopAgent stops a running agent. Used for cleanup on workflow failure.
 	StopAgent(ctx context.Context, agentID string) error
+	// GetAgentSummary returns the task summary of a completed agent.
+	GetAgentSummary(ctx context.Context, agentID string) (string, error)
 }
 
 // Engine executes a workflow by launching agents according to the dependency graph.
@@ -113,6 +115,7 @@ type Engine struct {
 	status   *WorkflowStatus
 	mu       sync.Mutex
 	onUpdate func(*WorkflowStatus) // optional callback on status change
+	gates    map[string]chan struct{} // approval gate channels
 }
 
 // NewEngine creates a workflow execution engine.
@@ -131,11 +134,21 @@ func (e *Engine) Run(ctx context.Context, w *Workflow) (*WorkflowStatus, error) 
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
+	state := &WorkflowState{Outputs: make(map[string]StepOutput)}
+
+	e.gates = make(map[string]chan struct{})
+	for _, s := range w.Steps {
+		if s.Gate == "approval" || s.Gate == "review" {
+			e.gates[s.Name] = make(chan struct{})
+		}
+	}
+
 	e.mu.Lock()
 	e.status = &WorkflowStatus{
-		Name:  w.Name,
-		State: "running",
-		Steps: make([]StepStatus, len(w.Steps)),
+		Name:    w.Name,
+		State:   "running",
+		Steps:   make([]StepStatus, len(w.Steps)),
+		Outputs: make(map[string]StepOutput),
 	}
 	stepIndex := make(map[string]int)
 	for i, s := range w.Steps {
@@ -206,13 +219,36 @@ func (e *Engine) Run(ctx context.Context, w *Workflow) (*WorkflowStatus, error) 
 				env[k] = v
 			}
 
+			// Interpolate task variables from prior step outputs
+			task := InterpolateTask(s.Task, state)
+
+			// Handle approval gate before launching
+			if s.Gate == "approval" {
+				e.mu.Lock()
+				e.status.Steps[idx].State = "awaiting_approval"
+				e.mu.Unlock()
+				e.notify()
+
+				select {
+				case <-e.gates[s.Name]:
+					// Approved, continue
+				case <-ctx.Done():
+					e.mu.Lock()
+					e.status.Steps[idx].State = "skipped"
+					e.status.Steps[idx].Error = "workflow cancelled"
+					e.mu.Unlock()
+					e.notify()
+					return
+				}
+			}
+
 			// Launch agent
 			e.mu.Lock()
 			e.status.Steps[idx].State = "running"
 			e.mu.Unlock()
 			e.notify()
 
-			agentID, err := e.launcher.StartAgent(ctx, s.Name, s.Task, s.Template, s.Branch, s.Image, env)
+			agentID, err := e.launcher.StartAgent(ctx, s.Name, task, s.Template, s.Branch, s.Image, env)
 			if err != nil {
 				e.mu.Lock()
 				e.status.Steps[idx].State = "failed"
@@ -246,12 +282,31 @@ func (e *Engine) Run(ctx context.Context, w *Workflow) (*WorkflowStatus, error) 
 				return
 			}
 
+			// Fetch agent summary for step output
+			summary, _ := e.launcher.GetAgentSummary(ctx, agentID)
+
 			e.mu.Lock()
 			if finalState == "completed" || finalState == "task_completed" {
 				e.status.Steps[idx].State = "completed"
+				state.Outputs[s.Name] = StepOutput{
+					StepName: s.Name,
+					AgentID:  agentID,
+					Status:   finalState,
+					Branch:   s.Branch,
+					Summary:  summary,
+				}
+				e.status.Outputs = copyOutputs(state.Outputs)
 			} else {
 				e.status.Steps[idx].State = "failed"
 				e.status.Steps[idx].Error = "agent ended with status: " + finalState
+				state.Outputs[s.Name] = StepOutput{
+					StepName: s.Name,
+					AgentID:  agentID,
+					Status:   finalState,
+					Branch:   s.Branch,
+					Summary:  summary,
+				}
+				e.status.Outputs = copyOutputs(state.Outputs)
 				errOnce.Do(func() {
 					firstErr = fmt.Errorf("step %q ended with status: %s", s.Name, finalState)
 					cancel() // Cancel remaining steps
@@ -301,6 +356,15 @@ func (e *Engine) cleanupRunningAgents(ctx context.Context) {
 	}
 }
 
+// copyOutputs creates a shallow copy of the outputs map for safe status snapshots.
+func copyOutputs(src map[string]StepOutput) map[string]StepOutput {
+	dst := make(map[string]StepOutput, len(src))
+	for k, v := range src {
+		dst[k] = v
+	}
+	return dst
+}
+
 func (e *Engine) notify() {
 	if e.onUpdate != nil {
 		e.mu.Lock()
@@ -319,4 +383,16 @@ func (e *Engine) Status() *WorkflowStatus {
 	}
 	s := *e.status
 	return &s
+}
+
+// Approve releases a pending approval gate for a step.
+func (e *Engine) Approve(stepName string) error {
+	e.mu.Lock()
+	ch, ok := e.gates[stepName]
+	e.mu.Unlock()
+	if !ok {
+		return fmt.Errorf("no pending gate for step %q", stepName)
+	}
+	close(ch) // unblocks the waiting goroutine
+	return nil
 }

@@ -1743,6 +1743,10 @@ func (s *Server) registerRoutes() {
 	// Live activity feed (SSE stream of all agent events in a grove)
 	s.mux.HandleFunc("/api/v1/activity-feed", s.handleActivityFeed)
 
+	// Task artifact routes (multi-agent coordination)
+	// Handles /api/v1/groves/{groveId}/tasks and /api/v1/groves/{groveId}/tasks/{taskId}
+	// Note: These are routed through the existing grove handler prefix matching.
+
 	// Cost summary endpoint (aggregated cost data per grove)
 	// Matched by the grove routes handler for /api/v1/groves/{id}/cost-summary
 

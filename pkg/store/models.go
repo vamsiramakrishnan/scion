@@ -101,6 +101,25 @@ type Agent struct {
 	StateVersion int64 `json:"stateVersion"`
 }
 
+// Task represents a unit of work in a multi-agent workflow.
+type Task struct {
+	ID         string            `json:"id"`
+	GroveID    string            `json:"groveId"`
+	WorkflowID string            `json:"workflowId,omitempty"`
+	Title      string            `json:"title"`
+	Status     string            `json:"status"` // pending, assigned, running, completed, failed, blocked, approved, rejected
+	CreatedBy  string            `json:"createdBy"`
+	AssignedTo string            `json:"assignedTo,omitempty"` // agent slug or ID
+	AgentID    string            `json:"agentId,omitempty"`    // actual agent ID when running
+	Branch     string            `json:"branch,omitempty"`
+	DependsOn  []string          `json:"dependsOn,omitempty"`
+	Input      map[string]string `json:"input,omitempty"`
+	Output     map[string]string `json:"output,omitempty"`
+	Summary    string            `json:"summary,omitempty"`
+	Created    time.Time         `json:"created"`
+	Updated    time.Time         `json:"updated"`
+}
+
 // AgentAppliedConfig stores the effective configuration of an agent.
 type AgentAppliedConfig struct {
 	Image         string              `json:"image,omitempty"`

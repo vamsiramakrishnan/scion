@@ -159,6 +159,7 @@ func (s *SQLiteStore) Migrate(ctx context.Context) error {
 		migrationV40,
 		migrationV41,
 		migrationV42,
+		migrationV43,
 	}
 
 	// Create migrations table if not exists
@@ -1006,6 +1007,115 @@ ALTER TABLE agents ADD COLUMN total_tokens INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE agents ADD COLUMN cost_usd REAL NOT NULL DEFAULT 0;
 ALTER TABLE agents ADD COLUMN model_name TEXT;
 `
+
+const migrationV43 = `
+CREATE TABLE IF NOT EXISTS tasks (
+	id TEXT PRIMARY KEY,
+	grove_id TEXT NOT NULL,
+	workflow_id TEXT DEFAULT '',
+	title TEXT NOT NULL,
+	status TEXT NOT NULL DEFAULT 'pending',
+	created_by TEXT NOT NULL,
+	assigned_to TEXT DEFAULT '',
+	agent_id TEXT DEFAULT '',
+	branch TEXT DEFAULT '',
+	depends_on TEXT DEFAULT '[]',
+	input TEXT DEFAULT '{}',
+	output TEXT DEFAULT '{}',
+	summary TEXT DEFAULT '',
+	created_at DATETIME NOT NULL,
+	updated_at DATETIME NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_tasks_grove_id ON tasks(grove_id);
+CREATE INDEX IF NOT EXISTS idx_tasks_workflow_id ON tasks(workflow_id);
+CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
+`
+
+// --- Task CRUD ---
+
+func (s *SQLiteStore) CreateTask(ctx context.Context, task *store.Task) error {
+	now := time.Now().UTC()
+	task.Created = now
+	task.Updated = now
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO tasks (id, grove_id, workflow_id, title, status, created_by, assigned_to, agent_id, branch, depends_on, input, output, summary, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		task.ID, task.GroveID, task.WorkflowID, task.Title, task.Status,
+		task.CreatedBy, task.AssignedTo, task.AgentID, task.Branch,
+		marshalJSON(task.DependsOn), marshalJSON(task.Input), marshalJSON(task.Output),
+		task.Summary, task.Created, task.Updated)
+	return err
+}
+
+func (s *SQLiteStore) GetTask(ctx context.Context, id string) (*store.Task, error) {
+	row := s.ReadDB().QueryRowContext(ctx, `SELECT id, grove_id, workflow_id, title, status, created_by, assigned_to, agent_id, branch, depends_on, input, output, summary, created_at, updated_at FROM tasks WHERE id = ?`, id)
+	return scanTask(row)
+}
+
+func (s *SQLiteStore) UpdateTask(ctx context.Context, task *store.Task) error {
+	task.Updated = time.Now().UTC()
+	_, err := s.db.ExecContext(ctx, `
+		UPDATE tasks SET workflow_id=?, title=?, status=?, assigned_to=?, agent_id=?, branch=?, depends_on=?, input=?, output=?, summary=?, updated_at=?
+		WHERE id = ?`,
+		task.WorkflowID, task.Title, task.Status, task.AssignedTo, task.AgentID, task.Branch,
+		marshalJSON(task.DependsOn), marshalJSON(task.Input), marshalJSON(task.Output),
+		task.Summary, task.Updated, task.ID)
+	return err
+}
+
+func (s *SQLiteStore) DeleteTask(ctx context.Context, id string) error {
+	_, err := s.db.ExecContext(ctx, `DELETE FROM tasks WHERE id = ?`, id)
+	return err
+}
+
+func (s *SQLiteStore) ListTasks(ctx context.Context, groveID string, filter store.TaskFilter) ([]store.Task, error) {
+	conditions := []string{"grove_id = ?"}
+	args := []interface{}{groveID}
+	if filter.WorkflowID != "" {
+		conditions = append(conditions, "workflow_id = ?")
+		args = append(args, filter.WorkflowID)
+	}
+	if filter.Status != "" {
+		conditions = append(conditions, "status = ?")
+		args = append(args, filter.Status)
+	}
+	if filter.AssignedTo != "" {
+		conditions = append(conditions, "assigned_to = ?")
+		args = append(args, filter.AssignedTo)
+	}
+	query := fmt.Sprintf("SELECT id, grove_id, workflow_id, title, status, created_by, assigned_to, agent_id, branch, depends_on, input, output, summary, created_at, updated_at FROM tasks WHERE %s ORDER BY created_at DESC", strings.Join(conditions, " AND "))
+	rows, err := s.ReadDB().QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var tasks []store.Task
+	for rows.Next() {
+		var t store.Task
+		var dependsOn, input, output string
+		if err := rows.Scan(&t.ID, &t.GroveID, &t.WorkflowID, &t.Title, &t.Status, &t.CreatedBy, &t.AssignedTo, &t.AgentID, &t.Branch, &dependsOn, &input, &output, &t.Summary, &t.Created, &t.Updated); err != nil {
+			return nil, err
+		}
+		unmarshalJSON(dependsOn, &t.DependsOn)
+		unmarshalJSON(input, &t.Input)
+		unmarshalJSON(output, &t.Output)
+		tasks = append(tasks, t)
+	}
+	return tasks, nil
+}
+
+func scanTask(row interface{ Scan(dest ...interface{}) error }) (*store.Task, error) {
+	var t store.Task
+	var dependsOn, input, output string
+	if err := row.Scan(&t.ID, &t.GroveID, &t.WorkflowID, &t.Title, &t.Status, &t.CreatedBy, &t.AssignedTo, &t.AgentID, &t.Branch, &dependsOn, &input, &output, &t.Summary, &t.Created, &t.Updated); err != nil {
+		return nil, err
+	}
+	unmarshalJSON(dependsOn, &t.DependsOn)
+	unmarshalJSON(input, &t.Input)
+	unmarshalJSON(output, &t.Output)
+	return &t, nil
+}
 
 // Helper functions for JSON marshaling/unmarshaling
 func marshalJSON(v interface{}) string {

@@ -43,6 +43,9 @@ type Store interface {
 	// Agent operations
 	AgentStore
 
+	// Task operations
+	TaskStore
+
 	// Grove operations
 	GroveStore
 
@@ -189,6 +192,22 @@ type AgentStatusUpdate struct {
 	OutputTokensDelta *int64   `json:"outputTokensDelta,omitempty"`
 	CostUSDDelta      *float64 `json:"costUsdDelta,omitempty"`
 	ModelName         string   `json:"modelName,omitempty"`
+}
+
+// TaskFilter specifies filtering criteria for listing tasks.
+type TaskFilter struct {
+	WorkflowID string
+	Status     string
+	AssignedTo string
+}
+
+// TaskStore defines task-related persistence operations.
+type TaskStore interface {
+	CreateTask(ctx context.Context, task *Task) error
+	GetTask(ctx context.Context, id string) (*Task, error)
+	UpdateTask(ctx context.Context, task *Task) error
+	DeleteTask(ctx context.Context, id string) error
+	ListTasks(ctx context.Context, groveID string, filter TaskFilter) ([]Task, error)
 }
 
 // GroveStore defines grove-related persistence operations.

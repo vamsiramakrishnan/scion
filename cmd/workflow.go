@@ -242,3 +242,22 @@ func (l *cliAgentLauncher) WaitForAgent(ctx context.Context, agentID string) (st
 func (l *cliAgentLauncher) StopAgent(ctx context.Context, agentID string) error {
 	return l.rt.Stop(ctx, agentID)
 }
+
+func (l *cliAgentLauncher) GetAgentSummary(ctx context.Context, agentID string) (string, error) {
+	// Try to get the agent's task summary from the runtime list
+	mgr := agent.NewManager(l.rt)
+	defer mgr.Close()
+	agents, err := mgr.List(ctx, nil)
+	if err != nil {
+		return "", err
+	}
+	for _, a := range agents {
+		if a.ContainerID == agentID || a.Name == agentID {
+			if a.TaskSummary != "" {
+				return a.TaskSummary, nil
+			}
+			return a.Activity, nil
+		}
+	}
+	return "", nil
+}

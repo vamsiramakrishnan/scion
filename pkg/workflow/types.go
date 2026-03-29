@@ -31,6 +31,8 @@ type Step struct {
 	Branch    string            `yaml:"branch,omitempty" json:"branch,omitempty"`
 	Image     string            `yaml:"image,omitempty" json:"image,omitempty"`
 	Env       map[string]string `yaml:"env,omitempty" json:"env,omitempty"`
+	Outputs   []string          `yaml:"outputs,omitempty" json:"outputs,omitempty"`
+	Gate      string            `yaml:"gate,omitempty" json:"gate,omitempty"` // "approval", "review", or "" (auto)
 }
 
 // StepStatus tracks runtime state of a workflow step.
@@ -41,9 +43,26 @@ type StepStatus struct {
 	Error   string `json:"error,omitempty"`
 }
 
+// StepOutput captures the output of a completed workflow step.
+type StepOutput struct {
+	StepName  string            `json:"step_name" yaml:"step_name"`
+	AgentID   string            `json:"agent_id,omitempty" yaml:"agent_id,omitempty"`
+	Status    string            `json:"status" yaml:"status"`
+	Branch    string            `json:"branch,omitempty" yaml:"branch,omitempty"`
+	Summary   string            `json:"summary,omitempty" yaml:"summary,omitempty"`
+	Artifacts map[string]string `json:"artifacts,omitempty" yaml:"artifacts,omitempty"`
+	Metadata  map[string]string `json:"metadata,omitempty" yaml:"metadata,omitempty"`
+}
+
+// WorkflowState is the shared state for a workflow execution.
+type WorkflowState struct {
+	Outputs map[string]StepOutput `json:"outputs"` // keyed by step name
+}
+
 // WorkflowStatus tracks overall workflow execution state.
 type WorkflowStatus struct {
-	Name  string       `json:"name"`
-	State string       `json:"state"` // running, completed, failed
-	Steps []StepStatus `json:"steps"`
+	Name    string                `json:"name"`
+	State   string                `json:"state"` // running, completed, failed
+	Steps   []StepStatus          `json:"steps"`
+	Outputs map[string]StepOutput `json:"outputs,omitempty"` // accumulated step outputs
 }
