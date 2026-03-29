@@ -25,6 +25,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/http/pprof"
 	"strings"
 	"sync"
 	"time"
@@ -1708,6 +1709,16 @@ func (s *Server) registerRoutes() {
 	// Message inbox endpoints (user-facing)
 	s.mux.HandleFunc("/api/v1/messages", s.handleMessages)
 	s.mux.HandleFunc("/api/v1/messages/", s.handleMessageRoutes)
+
+	// Debug profiling endpoints (only enabled with --debug flag)
+	if s.config.Debug {
+		s.mux.HandleFunc("/debug/pprof/", pprof.Index)
+		s.mux.HandleFunc("/debug/pprof/cmdline", pprof.Cmdline)
+		s.mux.HandleFunc("/debug/pprof/profile", pprof.Profile)
+		s.mux.HandleFunc("/debug/pprof/symbol", pprof.Symbol)
+		s.mux.HandleFunc("/debug/pprof/trace", pprof.Trace)
+		slog.Info("pprof profiling endpoints enabled at /debug/pprof/")
+	}
 
 	// WebSocket control channel endpoint for Runtime Brokers
 	s.mux.HandleFunc("/api/v1/runtime-brokers/connect", s.handleRuntimeBrokerConnect)

@@ -35,6 +35,27 @@ const (
 	DefaultMaxMessageSize  = 64 * 1024 // 64KB
 )
 
+// jsonBufferPool reuses byte buffers for JSON marshal/unmarshal operations
+// to reduce GC pressure on the WebSocket hot path.
+var jsonBufferPool = sync.Pool{
+	New: func() any {
+		buf := make([]byte, 0, 4096)
+		return &buf
+	},
+}
+
+// GetBuffer returns a byte buffer from the pool for temporary use.
+// Callers must call PutBuffer when done.
+func GetBuffer() *[]byte {
+	return jsonBufferPool.Get().(*[]byte)
+}
+
+// PutBuffer returns a byte buffer to the pool.
+func PutBuffer(buf *[]byte) {
+	*buf = (*buf)[:0]
+	jsonBufferPool.Put(buf)
+}
+
 // ConnectionConfig holds configuration for a WebSocket connection.
 type ConnectionConfig struct {
 	ReadBufferSize  int

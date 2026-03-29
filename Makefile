@@ -6,8 +6,8 @@ BUILD_DIR     := ./build
 CONTAINER_DIR := ./.build/container
 INSTALL_DIR   := $(HOME)/.local/bin
 MAIN_PKG      := ./cmd/scion
-LDFLAGS            := $(shell ./hack/version.sh)
-SCIONTOOL_LDFLAGS  := $(shell ./hack/version.sh github.com/GoogleCloudPlatform/scion/cmd/sciontool/commands)
+LDFLAGS            := -s -w $(shell ./hack/version.sh)
+SCIONTOOL_LDFLAGS  := -s -w $(shell ./hack/version.sh github.com/GoogleCloudPlatform/scion/cmd/sciontool/commands)
 CONTAINER_OS  := linux
 CONTAINER_ARCH := $(shell if [ "$$(uname -m)" = "x86_64" ]; then echo amd64; else echo arm64; fi)
 GOLANGCI_LINT := $(shell command -v golangci-lint 2>/dev/null || echo $(shell go env GOPATH)/bin/golangci-lint)
