@@ -182,6 +182,13 @@ type AgentStatusUpdate struct {
 	CurrentTurns      *int   `json:"currentTurns,omitempty"`
 	CurrentModelCalls *int   `json:"currentModelCalls,omitempty"`
 	StartedAt         string `json:"startedAt,omitempty"`
+
+	// Cost tracking (reported by sciontool from harness telemetry).
+	// These are delta values that get added to the agent's cumulative totals.
+	InputTokensDelta  *int64   `json:"inputTokensDelta,omitempty"`
+	OutputTokensDelta *int64   `json:"outputTokensDelta,omitempty"`
+	CostUSDDelta      *float64 `json:"costUsdDelta,omitempty"`
+	ModelName         string   `json:"modelName,omitempty"`
 }
 
 // GroveStore defines grove-related persistence operations.

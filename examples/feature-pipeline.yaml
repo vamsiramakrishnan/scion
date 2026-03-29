@@ -1,0 +1,28 @@
+# Example: Feature Implementation Pipeline
+#
+# Run with: scion workflow run examples/feature-pipeline.yaml
+#
+# Sequential pipeline: architect designs → developer implements → reviewer checks.
+
+name: feature-pipeline
+description: Design, implement, and review a feature end-to-end
+
+steps:
+  - name: architect
+    template: architect
+    task: "Design a user authentication system with JWT tokens, refresh tokens, and role-based access control. Write a detailed implementation plan in .design/auth-system.md."
+
+  - name: backend
+    template: fullstack-dev
+    task: "Implement the auth system based on the architect's design in .design/auth-system.md. Build the middleware, token management, and RBAC models."
+    depends_on: [architect]
+
+  - name: frontend
+    template: fullstack-dev
+    task: "Build the login page, registration form, and protected route components based on the architect's design."
+    depends_on: [architect]
+
+  - name: reviewer
+    template: code-reviewer
+    task: "Review the auth implementation from backend and frontend agents for security issues, bugs, and code quality."
+    depends_on: [backend, frontend]

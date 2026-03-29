@@ -1,0 +1,27 @@
+# Example: Code Review Pipeline
+#
+# Run with: scion workflow run examples/review-pipeline.yaml
+#
+# This workflow runs three specialized review agents in parallel,
+# then a summary agent that waits for all reviews to complete.
+
+name: code-review-pipeline
+description: Parallel code review with security audit and documentation check
+
+steps:
+  - name: reviewer
+    template: code-reviewer
+    task: "Review all recent changes for bugs, logic errors, and code quality issues. Focus on correctness and maintainability."
+
+  - name: security
+    template: security-reviewer
+    task: "Perform a security audit of the codebase. Check for OWASP Top 10 vulnerabilities, injection risks, and auth issues."
+
+  - name: docs
+    template: docs-writer
+    task: "Review project documentation for accuracy, completeness, and clarity. Update any outdated sections."
+
+  - name: summary
+    template: default
+    task: "Read the branches from the reviewer, security, and docs agents. Synthesize their findings into a single summary report with prioritized action items."
+    depends_on: [reviewer, security, docs]

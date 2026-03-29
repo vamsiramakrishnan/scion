@@ -54,6 +54,8 @@ import '../shared/agent-log-viewer.js';
 import type { ScionAgentLogViewer } from '../shared/agent-log-viewer.js';
 import '../shared/agent-message-viewer.js';
 import type { ScionAgentMessageViewer } from '../shared/agent-message-viewer.js';
+import '../shared/git-diff-viewer.js';
+import type { ScionGitDiffViewer } from '../shared/git-diff-viewer.js';
 
 /**
  * Parse a Go-style duration string (e.g. "2h30m", "1h", "45m", "90s") into
@@ -872,6 +874,12 @@ export class ScionPageAgentDetail extends LitElement {
       ) as ScionAgentMessageViewer | null;
       viewer?.loadMessages();
     }
+    if (e.detail.name === 'changes') {
+      const viewer = this.shadowRoot?.querySelector(
+        'scion-git-diff-viewer'
+      ) as ScionGitDiffViewer | null;
+      viewer?.loadDiff();
+    }
   }
 
   // ---------------------------------------------------------------------------
@@ -912,6 +920,7 @@ export class ScionPageAgentDetail extends LitElement {
         ${this.agent.cloudLogging
           ? html`<sl-tab slot="nav" panel="messages">Messages</sl-tab>`
           : nothing}
+        <sl-tab slot="nav" panel="changes">Changes</sl-tab>
         <sl-tab slot="nav" panel="configuration">Configuration</sl-tab>
 
         <sl-tab-panel name="status">${this.renderStatusTab()}</sl-tab-panel>
@@ -941,6 +950,9 @@ export class ScionPageAgentDetail extends LitElement {
               </sl-tab-panel>
             `
           : nothing}
+        <sl-tab-panel name="changes">
+          <scion-git-diff-viewer agentId=${this.agentId}></scion-git-diff-viewer>
+        </sl-tab-panel>
         <sl-tab-panel name="configuration">${this.renderConfigurationTab()}</sl-tab-panel>
       </sl-tab-group>
     `;

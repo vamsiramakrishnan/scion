@@ -1477,6 +1477,26 @@ func (s *SQLiteStore) UpdateAgentStatus(ctx context.Context, id string, su store
 		currentModelCallsVal = *su.CurrentModelCalls
 	}
 
+	// Prepare cost tracking delta values
+	var inputTokensDeltaProvided bool
+	var inputTokensDeltaVal int64
+	if su.InputTokensDelta != nil {
+		inputTokensDeltaProvided = true
+		inputTokensDeltaVal = *su.InputTokensDelta
+	}
+	var outputTokensDeltaProvided bool
+	var outputTokensDeltaVal int64
+	if su.OutputTokensDelta != nil {
+		outputTokensDeltaProvided = true
+		outputTokensDeltaVal = *su.OutputTokensDelta
+	}
+	var costUSDDeltaProvided bool
+	var costUSDDeltaVal float64
+	if su.CostUSDDelta != nil {
+		costUSDDeltaProvided = true
+		costUSDDeltaVal = *su.CostUSDDelta
+	}
+
 	result, err := s.db.ExecContext(ctx, `
 		UPDATE agents SET
 			phase = COALESCE(NULLIF(?, ''), phase),
@@ -1492,6 +1512,14 @@ func (s *SQLiteStore) UpdateAgentStatus(ctx context.Context, id string, su store
 			current_turns = CASE WHEN ? THEN ? ELSE current_turns END,
 			current_model_calls = CASE WHEN ? THEN ? ELSE current_model_calls END,
 			started_at = COALESCE(NULLIF(?, ''), started_at),
+			input_tokens = CASE WHEN ? THEN input_tokens + ? ELSE input_tokens END,
+			output_tokens = CASE WHEN ? THEN output_tokens + ? ELSE output_tokens END,
+			total_tokens = CASE WHEN ? OR ? THEN input_tokens + output_tokens +
+				CASE WHEN ? THEN ? ELSE 0 END +
+				CASE WHEN ? THEN ? ELSE 0 END
+				ELSE total_tokens END,
+			cost_usd = CASE WHEN ? THEN cost_usd + ? ELSE cost_usd END,
+			model_name = COALESCE(NULLIF(?, ''), model_name),
 			updated_at = ?,
 			last_seen = ?
 		WHERE id = ?
@@ -1506,6 +1534,13 @@ func (s *SQLiteStore) UpdateAgentStatus(ctx context.Context, id string, su store
 		currentTurnsProvided, currentTurnsVal,
 		currentModelCallsProvided, currentModelCallsVal,
 		su.StartedAt,
+		inputTokensDeltaProvided, inputTokensDeltaVal,
+		outputTokensDeltaProvided, outputTokensDeltaVal,
+		inputTokensDeltaProvided, outputTokensDeltaProvided,
+		inputTokensDeltaProvided, inputTokensDeltaVal,
+		outputTokensDeltaProvided, outputTokensDeltaVal,
+		costUSDDeltaProvided, costUSDDeltaVal,
+		su.ModelName,
 		now, now, id,
 	)
 	if err != nil {
