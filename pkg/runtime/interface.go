@@ -46,7 +46,9 @@ type RunConfig struct {
 	SharedDirs           []api.SharedDir
 	BrokerMode           bool
 	Debug                bool
-	MetadataInterception bool // Add NET_ADMIN cap for iptables-based metadata server interception
+	MetadataInterception bool   // Add NET_ADMIN cap for iptables-based metadata server interception
+	NetworkMode          string // Container network mode: "scion" (default), "none", "host", or custom
+	ImageDigest          string
 }
 
 type Runtime interface {

@@ -972,6 +972,9 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 	hostGID := int64(os.Getgid())
 	podSecurityContext := &corev1.PodSecurityContext{
 		FSGroup: &hostGID,
+		SeccompProfile: &corev1.SeccompProfile{
+			Type: corev1.SeccompProfileTypeRuntimeDefault,
+		},
 	}
 
 	// Determine image pull policy
@@ -1008,6 +1011,13 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 					WorkingDir:      "/workspace",
 					Stdin:           true,
 					TTY:             true,
+					SecurityContext: &corev1.SecurityContext{
+						AllowPrivilegeEscalation: boolPtr(false),
+						Capabilities: &corev1.Capabilities{
+							Drop: []corev1.Capability{"ALL"},
+							Add:  []corev1.Capability{"CHOWN", "SETUID", "SETGID", "DAC_OVERRIDE"},
+						},
+					},
 					VolumeMounts: []corev1.VolumeMount{
 						{Name: "workspace", MountPath: "/workspace"},
 					},

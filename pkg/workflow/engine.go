@@ -103,6 +103,8 @@ type AgentLauncher interface {
 	// WaitForAgent blocks until the agent reaches a terminal state.
 	// Returns the final status ("completed", "failed", "error", etc.)
 	WaitForAgent(ctx context.Context, agentID string) (string, error)
+	// StopAgent stops a running agent. Used for cleanup on workflow failure.
+	StopAgent(ctx context.Context, agentID string) error
 }
 
 // Engine executes a workflow by launching agents according to the dependency graph.
@@ -123,7 +125,12 @@ func NewEngine(launcher AgentLauncher, onUpdate func(*WorkflowStatus)) *Engine {
 
 // Run executes the workflow, respecting dependencies.
 // Steps with no dependencies run in parallel. Steps wait for their dependencies.
+// On failure, running agents are stopped and pending steps are skipped.
 func (e *Engine) Run(ctx context.Context, w *Workflow) (*WorkflowStatus, error) {
+	// Create a cancellable context so we can stop pending steps on failure
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
 	e.mu.Lock()
 	e.status = &WorkflowStatus{
 		Name:  w.Name,
@@ -171,8 +178,23 @@ func (e *Engine) Run(ctx context.Context, w *Workflow) (*WorkflowStatus, error) 
 						return
 					}
 				case <-ctx.Done():
+					e.mu.Lock()
+					e.status.Steps[idx].State = "skipped"
+					e.status.Steps[idx].Error = "workflow cancelled"
+					e.mu.Unlock()
+					e.notify()
 					return
 				}
+			}
+
+			// Check if context was cancelled before launching
+			if ctx.Err() != nil {
+				e.mu.Lock()
+				e.status.Steps[idx].State = "skipped"
+				e.status.Steps[idx].Error = "workflow cancelled"
+				e.mu.Unlock()
+				e.notify()
+				return
 			}
 
 			// Merge workflow-level and step-level env
@@ -197,7 +219,10 @@ func (e *Engine) Run(ctx context.Context, w *Workflow) (*WorkflowStatus, error) 
 				e.status.Steps[idx].Error = err.Error()
 				e.mu.Unlock()
 				e.notify()
-				errOnce.Do(func() { firstErr = fmt.Errorf("step %q failed to start: %w", s.Name, err) })
+				errOnce.Do(func() {
+					firstErr = fmt.Errorf("step %q failed to start: %w", s.Name, err)
+					cancel() // Cancel remaining steps
+				})
 				return
 			}
 
@@ -214,7 +239,10 @@ func (e *Engine) Run(ctx context.Context, w *Workflow) (*WorkflowStatus, error) 
 				e.status.Steps[idx].Error = err.Error()
 				e.mu.Unlock()
 				e.notify()
-				errOnce.Do(func() { firstErr = fmt.Errorf("step %q failed: %w", s.Name, err) })
+				errOnce.Do(func() {
+					firstErr = fmt.Errorf("step %q failed: %w", s.Name, err)
+					cancel() // Cancel remaining steps
+				})
 				return
 			}
 
@@ -224,7 +252,10 @@ func (e *Engine) Run(ctx context.Context, w *Workflow) (*WorkflowStatus, error) 
 			} else {
 				e.status.Steps[idx].State = "failed"
 				e.status.Steps[idx].Error = "agent ended with status: " + finalState
-				errOnce.Do(func() { firstErr = fmt.Errorf("step %q ended with status: %s", s.Name, finalState) })
+				errOnce.Do(func() {
+					firstErr = fmt.Errorf("step %q ended with status: %s", s.Name, finalState)
+					cancel() // Cancel remaining steps
+				})
 			}
 			e.mu.Unlock()
 			e.notify()
@@ -232,6 +263,11 @@ func (e *Engine) Run(ctx context.Context, w *Workflow) (*WorkflowStatus, error) 
 	}
 
 	wg.Wait()
+
+	// Cleanup: stop any agents that are still running after a failure
+	if firstErr != nil {
+		e.cleanupRunningAgents(context.Background())
+	}
 
 	e.mu.Lock()
 	if firstErr != nil {
@@ -244,6 +280,25 @@ func (e *Engine) Run(ctx context.Context, w *Workflow) (*WorkflowStatus, error) 
 	e.notify()
 
 	return &result, firstErr
+}
+
+// cleanupRunningAgents stops all agents that are still in "running" state.
+// Called after a workflow failure to prevent orphaned agents.
+func (e *Engine) cleanupRunningAgents(ctx context.Context) {
+	e.mu.Lock()
+	var toStop []string
+	for _, s := range e.status.Steps {
+		if s.State == "running" && s.AgentID != "" {
+			toStop = append(toStop, s.AgentID)
+		}
+	}
+	e.mu.Unlock()
+
+	for _, agentID := range toStop {
+		if err := e.launcher.StopAgent(ctx, agentID); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: failed to stop agent %s: %v\n", agentID, err)
+		}
+	}
 }
 
 func (e *Engine) notify() {

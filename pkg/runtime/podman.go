@@ -19,6 +19,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"os"
 	"os/exec"
 	goruntime "runtime"
@@ -142,6 +143,13 @@ func (r *PodmanRuntime) Run(ctx context.Context, config RunConfig) (string, erro
 	// Inject GCP telemetry credential path if the well-known secret is present
 	if credPath := findGCPTelemetryCredentialPath(config.ResolvedSecrets, util.GetHomeDir(config.UnixUsername)); credPath != "" {
 		config.Env = append(config.Env, telemetryGCPCredentialsEnvVar+"="+credPath)
+	}
+
+	// Ensure the scion bridge network exists for container isolation
+	if config.NetworkMode == "" || config.NetworkMode == "scion" {
+		if err := ensurePodmanNetwork(ctx, r.Command, "scion"); err != nil {
+			slog.Warn("Failed to create scion network, falling back to default", "error", err)
+		}
 	}
 
 	args, err := buildCommonRunArgs(config)
@@ -327,7 +335,27 @@ func (r *PodmanRuntime) ImageExists(ctx context.Context, image string) (bool, er
 }
 
 func (r *PodmanRuntime) PullImage(ctx context.Context, image string) error {
-	return runInteractiveCommand(r.Command, "pull", image)
+	if err := runInteractiveCommand(r.Command, "pull", image); err != nil {
+		return err
+	}
+	// Log the pulled image digest for audit trail
+	out, err := runSimpleCommand(ctx, r.Command, "inspect", "--format", "{{index .RepoDigests 0}}", image)
+	if err == nil && strings.TrimSpace(out) != "" {
+		slog.Info("Pulled image", "image", image, "digest", strings.TrimSpace(out))
+	}
+	return nil
+}
+
+// ensurePodmanNetwork creates a Podman network if it doesn't already exist.
+func ensurePodmanNetwork(ctx context.Context, command, name string) error {
+	// Check if network exists
+	_, err := runSimpleCommand(ctx, command, "network", "inspect", name)
+	if err == nil {
+		return nil // already exists
+	}
+	// Create the network
+	_, err = runSimpleCommand(ctx, command, "network", "create", "--driver", "bridge", name)
+	return err
 }
 
 func (r *PodmanRuntime) Sync(ctx context.Context, id string, direction SyncDirection) error {

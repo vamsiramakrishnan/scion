@@ -162,6 +162,13 @@ func buildCommonRunArgs(config RunConfig) ([]string, error) {
 
 	addArg("--name", config.Name)
 
+	// Network isolation: use dedicated bridge network by default
+	networkMode := config.NetworkMode
+	if networkMode == "" {
+		networkMode = "scion" // dedicated bridge, isolates from host localhost
+	}
+	addArg("--network", networkMode)
+
 	if config.HomeDir != "" {
 		registerMount(config.HomeDir, util.GetHomeDir(config.UnixUsername), false, true)
 	}
@@ -208,7 +215,17 @@ func buildCommonRunArgs(config RunConfig) ([]string, error) {
 		dedupedVolumes[tgt] = v
 	}
 	for _, tgt := range dedupedOrder {
-		addVolume(dedupedVolumes[tgt])
+		v := dedupedVolumes[tgt]
+		// Validate GCS bucket and prefix to prevent shell injection
+		if v.Type == "gcs" {
+			if !isValidGCSBucket(v.Bucket) {
+				return nil, fmt.Errorf("invalid GCS bucket name: %q (must be alphanumeric with hyphens/dots/underscores)", v.Bucket)
+			}
+			if v.Prefix != "" && !isValidGCSPath(v.Prefix) {
+				return nil, fmt.Errorf("invalid GCS prefix: %q (must be alphanumeric with slashes/hyphens/dots/underscores)", v.Prefix)
+			}
+		}
+		addVolume(v)
 	}
 
 	// If workdir was not set by the RepoRoot/Workspace logic above, check if we have an explicit
@@ -259,14 +276,22 @@ func buildCommonRunArgs(config RunConfig) ([]string, error) {
 		home, _ := os.UserHomeDir()
 		gcloudConfigDir := filepath.Join(home, ".config", "gcloud")
 		if _, err := os.Stat(gcloudConfigDir); err == nil {
-			// Pre-create the mount-point directory inside the agent home so that
-			// Docker does not create it as root (which would make the agent
-			// directory undeletable by a non-root broker process).
+			// Mount only specific credential files, not the entire gcloud directory
+			containerGcloudDir := fmt.Sprintf("/home/%s/.config/gcloud", config.UnixUsername)
 			if config.HomeDir != "" {
 				mountPoint := filepath.Join(config.HomeDir, ".config", "gcloud")
 				_ = os.MkdirAll(mountPoint, 0755)
 			}
-			registerMount(gcloudConfigDir, fmt.Sprintf("/home/%s/.config/gcloud", config.UnixUsername), true, false)
+			// Application Default Credentials
+			adcPath := filepath.Join(gcloudConfigDir, "application_default_credentials.json")
+			if _, err := os.Stat(adcPath); err == nil {
+				registerMount(adcPath, filepath.Join(containerGcloudDir, "application_default_credentials.json"), true, false)
+			}
+			// Properties file (contains project ID, region)
+			propsPath := filepath.Join(gcloudConfigDir, "properties")
+			if _, err := os.Stat(propsPath); err == nil {
+				registerMount(propsPath, filepath.Join(containerGcloudDir, "properties"), true, false)
+			}
 		}
 	}
 
@@ -279,10 +304,31 @@ func buildCommonRunArgs(config RunConfig) ([]string, error) {
 		}
 	}
 
-	// Inject environment-type resolved secrets
+	// Inject environment-type resolved secrets via tmpfs-mounted files
+	// to avoid exposing them via docker inspect
+	var secretFiles []struct{ name, value string }
 	for _, s := range config.ResolvedSecrets {
 		if s.Type == "environment" || s.Type == "" {
-			addArg("-e", fmt.Sprintf("%s=%s", s.Target, s.Value))
+			secretFiles = append(secretFiles, struct{ name, value string }{s.Target, s.Value})
+		}
+	}
+	if len(secretFiles) > 0 {
+		// Stage secret files on host in a temporary directory
+		secretStagingDir, err := os.MkdirTemp("", "scion-secrets-*")
+		if err != nil {
+			return nil, fmt.Errorf("create secrets staging dir: %w", err)
+		}
+		for _, sf := range secretFiles {
+			secretPath := filepath.Join(secretStagingDir, sf.name)
+			if err := os.WriteFile(secretPath, []byte(sf.value), 0400); err != nil {
+				return nil, fmt.Errorf("write secret %s: %w", sf.name, err)
+			}
+		}
+		// Mount the staging dir as read-only into the container
+		registerMount(secretStagingDir, "/run/secrets/scion", true, true)
+		// Set *_FILE env vars pointing to the mounted secret files
+		for _, sf := range secretFiles {
+			addEnv(sf.name+"_FILE", filepath.Join("/run/secrets/scion", sf.name))
 		}
 	}
 
@@ -316,7 +362,12 @@ func buildCommonRunArgs(config RunConfig) ([]string, error) {
 	}
 
 	if len(fuseMounts) > 0 {
+		addArg("--cap-drop", "ALL")
 		addArg("--cap-add", "SYS_ADMIN")
+		addArg("--cap-add", "CHOWN")
+		addArg("--cap-add", "SETUID")
+		addArg("--cap-add", "SETGID")
+		addArg("--cap-add", "DAC_OVERRIDE")
 		addArg("--device", "/dev/fuse")
 		if data, err := json.Marshal(gcsVolumes); err == nil {
 			encoded := base64.StdEncoding.EncodeToString(data)

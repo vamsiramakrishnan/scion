@@ -322,7 +322,11 @@ type ScionConfig struct {
 	Services         []ServiceSpec     `json:"services,omitempty" yaml:"services,omitempty"`
 	MaxTurns         int               `json:"max_turns,omitempty" yaml:"max_turns,omitempty"`
 	MaxModelCalls    int               `json:"max_model_calls,omitempty" yaml:"max_model_calls,omitempty"`
-	MaxDuration      string            `json:"max_duration,omitempty" yaml:"max_duration,omitempty"`
+	MaxDuration    string            `json:"max_duration,omitempty" yaml:"max_duration,omitempty"`
+	NetworkMode    string            `json:"network_mode,omitempty" yaml:"network_mode,omitempty"`
+	BudgetLimitUSD float64           `json:"budget_limit_usd,omitempty" yaml:"budget_limit_usd,omitempty"`
+	SeccompProfile string            `json:"seccomp_profile,omitempty" yaml:"seccomp_profile,omitempty"`
+	ImageDigest    string            `json:"image_digest,omitempty" yaml:"image_digest,omitempty"`
 	Hub              *AgentHubConfig   `json:"hub,omitempty" yaml:"hub,omitempty"`
 	Telemetry        *TelemetryConfig  `json:"telemetry,omitempty" yaml:"telemetry,omitempty"`
 

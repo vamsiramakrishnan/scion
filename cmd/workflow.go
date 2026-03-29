@@ -238,3 +238,7 @@ func (l *cliAgentLauncher) WaitForAgent(ctx context.Context, agentID string) (st
 		}
 	}
 }
+
+func (l *cliAgentLauncher) StopAgent(ctx context.Context, agentID string) error {
+	return l.rt.Stop(ctx, agentID)
+}

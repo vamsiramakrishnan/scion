@@ -114,6 +114,11 @@ func runInit(args []string) int {
 	// Set up scion user UID/GID to match host user
 	targetUID, targetGID, rootless := setupHostUser()
 
+	// Expand *_FILE env vars: read file contents and set the base env var.
+	// This allows secrets mounted as files to be consumed by harnesses that
+	// expect env vars (ANTHROPIC_API_KEY, GOOGLE_API_KEY, etc.)
+	expandFileEnvVars()
+
 	// Chown the log file so the scion user can write to it even if it was created by root
 	if targetUID != 0 {
 		if err := log.Chown(targetUID, targetGID); err != nil {
@@ -1398,4 +1403,31 @@ func isWorkspaceEmpty(path string) bool {
 		}
 	}
 	return true
+}
+
+// expandFileEnvVars reads all environment variables ending in _FILE,
+// reads the file contents, and sets the base env var (without _FILE suffix).
+// This bridges tmpfs-mounted secrets with harnesses that expect env vars.
+func expandFileEnvVars() {
+	for _, e := range os.Environ() {
+		parts := strings.SplitN(e, "=", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		key, filePath := parts[0], parts[1]
+		if !strings.HasSuffix(key, "_FILE") {
+			continue
+		}
+		baseKey := strings.TrimSuffix(key, "_FILE")
+		// Don't overwrite if already set
+		if os.Getenv(baseKey) != "" {
+			continue
+		}
+		data, err := os.ReadFile(filePath)
+		if err != nil {
+			log.Debug("Failed to read secret file for %s: %v", key, err)
+			continue
+		}
+		os.Setenv(baseKey, strings.TrimSpace(string(data)))
+	}
 }

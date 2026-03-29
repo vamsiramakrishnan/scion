@@ -24,11 +24,13 @@ const ExitCodeLimitsExceeded = 10
 
 // LimitsState represents the persisted limit counters in agent-limits.json.
 type LimitsState struct {
-	TurnCount      int    `json:"turn_count"`
-	ModelCallCount int    `json:"model_call_count"`
-	MaxTurns       int    `json:"max_turns"`
-	MaxModelCalls  int    `json:"max_model_calls"`
-	StartedAt      string `json:"started_at"`
+	TurnCount      int     `json:"turn_count"`
+	ModelCallCount int     `json:"model_call_count"`
+	MaxTurns       int     `json:"max_turns"`
+	MaxModelCalls  int     `json:"max_model_calls"`
+	StartedAt      string  `json:"started_at"`
+	CostUSD        float64 `json:"cost_usd"`
+	BudgetLimitUSD float64 `json:"budget_limit_usd"`
 }
 
 // LimitsHandler tracks turn and model call counts and enforces configured limits.
@@ -37,6 +39,7 @@ type LimitsState struct {
 type LimitsHandler struct {
 	maxTurns      int
 	maxModelCalls int
+	budgetLimit   float64
 	limitsPath    string
 	statusHandler *StatusHandler
 }
@@ -47,8 +50,9 @@ type LimitsHandler struct {
 func NewLimitsHandler() *LimitsHandler {
 	maxTurns := ParseEnvInt("SCION_MAX_TURNS")
 	maxModelCalls := ParseEnvInt("SCION_MAX_MODEL_CALLS")
+	budgetLimit := ParseEnvFloat("SCION_BUDGET_LIMIT_USD")
 
-	if maxTurns <= 0 && maxModelCalls <= 0 {
+	if maxTurns <= 0 && maxModelCalls <= 0 && budgetLimit <= 0 {
 		return nil
 	}
 
@@ -60,6 +64,7 @@ func NewLimitsHandler() *LimitsHandler {
 	return &LimitsHandler{
 		maxTurns:      maxTurns,
 		maxModelCalls: maxModelCalls,
+		budgetLimit:   budgetLimit,
 		limitsPath:    filepath.Join(home, "agent-limits.json"),
 		statusHandler: NewStatusHandler(),
 	}
@@ -94,10 +99,26 @@ func (h *LimitsHandler) Handle(event *hooks.Event) error {
 		return h.incrementAndCheck("turn_count", h.maxTurns, "max_turns")
 
 	case hooks.EventModelEnd:
-		if h.maxModelCalls <= 0 {
-			return nil
+		if h.maxModelCalls > 0 {
+			if err := h.incrementAndCheck("model_call_count", h.maxModelCalls, "max_model_calls"); err != nil {
+				return err
+			}
 		}
-		return h.incrementAndCheck("model_call_count", h.maxModelCalls, "max_model_calls")
+
+		// Cost budget tracking
+		if h.budgetLimit > 0 {
+			inputTokens := event.Data.InputTokens
+			outputTokens := event.Data.OutputTokens
+			modelName := os.Getenv("SCION_MODEL")
+			if inputTokens > 0 || outputTokens > 0 {
+				cost := EstimateCost(modelName, inputTokens, outputTokens)
+				if err := h.incrementCostAndCheck(cost); err != nil {
+					return err
+				}
+			}
+		}
+
+		return nil
 
 	default:
 		return nil
@@ -107,12 +128,15 @@ func (h *LimitsHandler) Handle(event *hooks.Event) error {
 // InitLimitsFile creates or resets the agent-limits.json file.
 // Called during post-start to initialize counters (they reset on each start/resume).
 func InitLimitsFile(limitsPath string, maxTurns, maxModelCalls int) error {
+	budgetLimit := ParseEnvFloat("SCION_BUDGET_LIMIT_USD")
 	ls := LimitsState{
 		TurnCount:      0,
 		ModelCallCount: 0,
 		MaxTurns:       maxTurns,
 		MaxModelCalls:  maxModelCalls,
 		StartedAt:      time.Now().UTC().Format(time.RFC3339),
+		CostUSD:        0,
+		BudgetLimitUSD: budgetLimit,
 	}
 	return writeLimitsState(limitsPath, &ls)
 }
@@ -255,6 +279,44 @@ func signalLimitsExceeded() error {
 		return nil
 	}
 	return nil
+}
+
+// incrementCostAndCheck reads the limits file, adds the cost delta, and
+// triggers shutdown if the cumulative cost exceeds the configured budget.
+func (h *LimitsHandler) incrementCostAndCheck(deltaCost float64) error {
+	ls, err := h.readLimitsState()
+	if err != nil {
+		log.Error("Failed to read agent-limits.json for cost tracking: %v", err)
+		return nil
+	}
+
+	ls.CostUSD += deltaCost
+	ls.BudgetLimitUSD = h.budgetLimit
+
+	if err := writeLimitsState(h.limitsPath, ls); err != nil {
+		log.Error("Failed to write agent-limits.json: %v", err)
+		return nil
+	}
+
+	if ls.CostUSD >= h.budgetLimit {
+		message := fmt.Sprintf("cost budget of $%.2f exceeded (spent $%.4f)", h.budgetLimit, ls.CostUSD)
+		h.triggerLimitsExceeded(message)
+	}
+
+	return nil
+}
+
+// ParseEnvFloat reads a float64 from an environment variable. Returns 0 if unset or invalid.
+func ParseEnvFloat(name string) float64 {
+	s := os.Getenv(name)
+	if s == "" {
+		return 0
+	}
+	v, err := strconv.ParseFloat(s, 64)
+	if err != nil {
+		return 0
+	}
+	return v
 }
 
 // ParseEnvInt reads an integer from an environment variable. Returns 0 if unset or invalid.

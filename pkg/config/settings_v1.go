@@ -278,6 +278,9 @@ type V1ServerConfig struct {
 
 	// GitHubApp configures the Hub's GitHub App integration for agent git authentication.
 	GitHubApp *V1GitHubAppConfig `json:"github_app,omitempty" yaml:"github_app,omitempty" koanf:"github_app"`
+
+	// RateLimit configures HTTP rate limiting for the Hub server.
+	RateLimit *V1RateLimitConfig `json:"rate_limit,omitempty" yaml:"rate_limit,omitempty" koanf:"rate_limit"`
 }
 
 // V1GitHubAppConfig holds the GitHub App configuration in settings.yaml format.
@@ -289,6 +292,13 @@ type V1GitHubAppConfig struct {
 	APIBaseURL      string `json:"api_base_url,omitempty" yaml:"api_base_url,omitempty" koanf:"api_base_url"`
 	WebhooksEnabled bool   `json:"webhooks_enabled,omitempty" yaml:"webhooks_enabled,omitempty" koanf:"webhooks_enabled"`
 	InstallationURL string `json:"installation_url,omitempty" yaml:"installation_url,omitempty" koanf:"installation_url"`
+}
+
+// V1RateLimitConfig configures HTTP rate limiting for the Hub server.
+type V1RateLimitConfig struct {
+	AuthenticatedRPS   float64 `json:"authenticated_rps,omitempty" yaml:"authenticated_rps,omitempty" koanf:"authenticated_rps"`
+	UnauthenticatedRPS float64 `json:"unauthenticated_rps,omitempty" yaml:"unauthenticated_rps,omitempty" koanf:"unauthenticated_rps"`
+	Burst              int     `json:"burst,omitempty" yaml:"burst,omitempty" koanf:"burst"`
 }
 
 // V1NotificationChannelConfig holds configuration for an external notification channel.
@@ -530,6 +540,7 @@ type HarnessConfigEntry struct {
 	Volumes          []api.VolumeMount    `json:"volumes,omitempty" yaml:"volumes,omitempty" koanf:"volumes"`
 	AuthSelectedType string               `json:"auth_selected_type,omitempty" yaml:"auth_selected_type,omitempty" koanf:"auth_selected_type"`
 	Secrets          []api.RequiredSecret `json:"secrets,omitempty" yaml:"secrets,omitempty" koanf:"secrets"`
+	NetworkMode      string               `json:"network_mode,omitempty" yaml:"network_mode,omitempty" koanf:"network_mode"`
 }
 
 // V1HarnessOverride defines a harness override entry in versioned settings.

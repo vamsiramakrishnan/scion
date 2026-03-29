@@ -463,6 +463,9 @@ type Server struct {
 	// GCP token rate limiter (nil = no rate limiting)
 	gcpTokenRateLimiter *GCPTokenRateLimiter
 
+	// HTTP rate limiter for per-identity request throttling
+	httpRateLimiter *HTTPRateLimiter
+
 	// GCP token metrics tracker (nil = disabled)
 	gcpTokenMetrics *GCPTokenMetrics
 
@@ -653,6 +656,9 @@ func New(cfg ServerConfig, s store.Store) *Server {
 
 	// Initialize GCP token rate limiter (1 req/sec average, burst of 10)
 	srv.gcpTokenRateLimiter = NewGCPTokenRateLimiter(1, 10)
+
+	// Initialize HTTP rate limiter for per-identity request throttling
+	srv.httpRateLimiter = NewHTTPRateLimiter(DefaultRateLimitConfig())
 
 	srv.registerRoutes()
 
@@ -1783,6 +1789,11 @@ func (s *Server) applyMiddleware(h http.Handler) http.Handler {
 	// Apply admin mode middleware (after auth, so identity is available).
 	// Always applied — checks runtime MaintenanceState on each request.
 	h = adminModeMiddleware(s.maintenance)(h)
+
+	// Apply HTTP rate limiting (after auth headers are available but before auth validation)
+	if s.httpRateLimiter != nil {
+		h = s.httpRateLimiter.Middleware(h)
+	}
 
 	// Apply unified auth middleware
 	// This handles all authentication types: agent tokens, user tokens, API keys, dev tokens

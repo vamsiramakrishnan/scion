@@ -9,7 +9,6 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
-	"strings"
 	"time"
 
 	state "github.com/GoogleCloudPlatform/scion/pkg/agent/state"
@@ -339,7 +338,7 @@ func applyCostFields(su *hub.StatusUpdate, event *hooks.Event) {
 		su.OutputTokensDelta = &v
 	}
 
-	costUSD := estimateCostUSD(model, event.Data.InputTokens, event.Data.OutputTokens)
+	costUSD := EstimateCost(model, event.Data.InputTokens, event.Data.OutputTokens)
 	if costUSD > 0 {
 		su.CostUSDDelta = &costUSD
 	}
@@ -349,52 +348,3 @@ func applyCostFields(su *hub.StatusUpdate, event *hooks.Event) {
 	}
 }
 
-// estimateCostUSD returns an estimated cost in USD for the given token counts
-// based on standard model pricing. Prices are per million tokens (MTok).
-//
-// Pricing sources (approximate, as of 2025):
-//
-//	Claude Sonnet:    $3/MTok input,   $15/MTok output
-//	Claude Opus:      $15/MTok input,  $75/MTok output
-//	Claude Haiku:     $0.25/MTok input, $1.25/MTok output
-//	Gemini 2.5 Pro:   $1.25/MTok input, $10/MTok output
-//	Gemini 2.5 Flash: $0.15/MTok input, $0.60/MTok output
-//	GPT-4o:           $2.50/MTok input, $10/MTok output
-//	GPT-4o-mini:      $0.15/MTok input, $0.60/MTok output
-func estimateCostUSD(model string, inputTokens, outputTokens int64) float64 {
-	// Default pricing (Claude Sonnet-class)
-	inputPricePerMTok := 3.0
-	outputPricePerMTok := 15.0
-
-	m := strings.ToLower(model)
-	switch {
-	case strings.Contains(m, "opus"):
-		inputPricePerMTok = 15.0
-		outputPricePerMTok = 75.0
-	case strings.Contains(m, "sonnet"):
-		inputPricePerMTok = 3.0
-		outputPricePerMTok = 15.0
-	case strings.Contains(m, "haiku"):
-		inputPricePerMTok = 0.25
-		outputPricePerMTok = 1.25
-	case strings.Contains(m, "gemini") && strings.Contains(m, "pro"):
-		inputPricePerMTok = 1.25
-		outputPricePerMTok = 10.0
-	case strings.Contains(m, "gemini") && strings.Contains(m, "flash"):
-		inputPricePerMTok = 0.15
-		outputPricePerMTok = 0.60
-	case strings.Contains(m, "gpt-4o-mini"):
-		inputPricePerMTok = 0.15
-		outputPricePerMTok = 0.60
-	case strings.Contains(m, "gpt-4o"):
-		inputPricePerMTok = 2.50
-		outputPricePerMTok = 10.0
-	case strings.Contains(m, "gpt-4"):
-		inputPricePerMTok = 2.50
-		outputPricePerMTok = 10.0
-	}
-
-	cost := (float64(inputTokens) * inputPricePerMTok / 1_000_000) +
-		(float64(outputTokens) * outputPricePerMTok / 1_000_000)
-	return cost
-}
