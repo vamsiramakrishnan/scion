@@ -557,6 +557,10 @@ func IsBrokerModeFromContext(ctx context.Context) bool {
 	return v
 }
 
+// ProgressFunc is called during agent start to report progress steps.
+// Used by the CLI to show step-by-step feedback instead of silence.
+type ProgressFunc func(step string)
+
 type StartOptions struct {
 	Name              string
 	Task              string
@@ -580,6 +584,7 @@ type StartOptions struct {
 	TelemetryOverride *bool           // Explicit telemetry override from CLI flags (--enable-telemetry / --disable-telemetry)
 	InlineConfig      *ScionConfig    // Inline config from --config flag, merged over template config
 	SharedDirs        []SharedDir     // Grove-level shared directories (from Hub, merged with settings)
+	OnProgress        ProgressFunc    // Optional callback for reporting progress steps to the CLI
 }
 
 type StatusEvent struct {

@@ -482,7 +482,14 @@ func RunAgent(cmd *cobra.Command, args []string, resume bool) error {
 		util.Debugf("[auth]   cloudProject=%q, cloudRegion=%q", localAuth.GoogleCloudProject, localAuth.GoogleCloudRegion)
 	}
 
-	// We still might want to show some progress in the CLI
+	// Progress reporting — show step-by-step feedback during agent start
+	// instead of silence. This is the #1 DX complaint: 10-30s of no output.
+	if !isJSONOutput() {
+		opts.OnProgress = func(step string) {
+			fmt.Fprintf(os.Stderr, "  %s\n", step)
+		}
+	}
+
 	if resume {
 		statusf("Resuming agent '%s'...\n", agentName)
 	} else {
@@ -500,13 +507,14 @@ func RunAgent(cmd *cobra.Command, args []string, resume bool) error {
 
 	if !info.Detached {
 		statusf("Attaching to agent '%s'...\n", agentName)
+		fmt.Fprintf(os.Stderr, "  Waiting for agent to initialize...\n")
 
 		// Wait for the container to be ready before attaching.
 		// After container start, sciontool init needs time to set up the user,
 		// run pre-start hooks, and launch the child process. The tmux session
 		// must exist before we can attach.
 		if err := waitForTmuxSession(rt, agentName); err != nil {
-			return err
+			return fmt.Errorf("%w\n\nTroubleshooting:\n  - Check container logs: scion logs %s\n  - Verify image exists: docker images | grep scion\n  - Check Docker is running: docker info", err, agentName)
 		}
 
 		return rt.Attach(context.Background(), agentName)
