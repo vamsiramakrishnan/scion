@@ -1,0 +1,6 @@
+schema_version: "1"
+description: "Security reviewer — audits code for vulnerabilities, misconfigurations, and compliance"
+agent_instructions: agents.md
+system_prompt: system-prompt.md
+env:
+  SCION_ROLE: security-reviewer

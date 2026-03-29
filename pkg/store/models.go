@@ -51,6 +51,14 @@ type Agent struct {
 	CurrentModelCalls int       `json:"currentModelCalls,omitempty"`
 	StartedAt         time.Time `json:"startedAt,omitempty"`
 
+	// Cost tracking (updated by sciontool from harness-native telemetry).
+	// Token counts and cost are cumulative for the agent's lifetime.
+	InputTokens  int64   `json:"inputTokens,omitempty"`  // Total input/prompt tokens consumed
+	OutputTokens int64   `json:"outputTokens,omitempty"` // Total output/completion tokens consumed
+	TotalTokens  int64   `json:"totalTokens,omitempty"`  // InputTokens + OutputTokens
+	CostUSD      float64 `json:"costUsd,omitempty"`      // Estimated cost in USD (from harness pricing)
+	ModelName    string  `json:"modelName,omitempty"`     // Model used (e.g. "claude-opus-4-6", "gemini-3-flash")
+
 	// Stalled detection
 	StalledFromActivity string `json:"stalledFromActivity,omitempty"` // Activity before stalled; empty when not stalled
 

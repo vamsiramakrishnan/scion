@@ -158,6 +158,7 @@ func (s *SQLiteStore) Migrate(ctx context.Context) error {
 		migrationV39,
 		migrationV40,
 		migrationV41,
+		migrationV42,
 	}
 
 	// Create migrations table if not exists
@@ -995,6 +996,15 @@ CREATE INDEX IF NOT EXISTS idx_grove_contributors_status ON grove_contributors(g
 CREATE INDEX IF NOT EXISTS idx_templates_grove ON templates(grove_id) WHERE grove_id IS NOT NULL;
 -- Index for user access tokens by user (used in token listing)
 CREATE INDEX IF NOT EXISTS idx_user_access_tokens_user ON user_access_tokens(user_id, created_at DESC);
+`
+
+// Migration V42: Cost tracking columns for agents
+const migrationV42 = `
+ALTER TABLE agents ADD COLUMN input_tokens INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE agents ADD COLUMN output_tokens INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE agents ADD COLUMN total_tokens INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE agents ADD COLUMN cost_usd REAL NOT NULL DEFAULT 0;
+ALTER TABLE agents ADD COLUMN model_name TEXT;
 `
 
 // Helper functions for JSON marshaling/unmarshaling

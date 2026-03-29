@@ -1,0 +1,6 @@
+schema_version: "1"
+description: "Software architect — designs systems, reviews architecture, plans implementations"
+agent_instructions: agents.md
+system_prompt: system-prompt.md
+env:
+  SCION_ROLE: architect

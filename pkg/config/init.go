@@ -216,6 +216,69 @@ func SeedAgnosticTemplate(targetDir string, force bool) error {
 	return nil
 }
 
+// builtInRoleTemplates lists the role-specialized templates shipped with scion.
+// Each name corresponds to a directory under embeds/templates/.
+var builtInRoleTemplates = []string{
+	"code-reviewer",
+	"security-reviewer",
+	"docs-writer",
+	"architect",
+	"fullstack-dev",
+}
+
+// SeedBuiltInTemplates seeds all built-in role templates (code-reviewer,
+// security-reviewer, etc.) into the target templates directory.
+func SeedBuiltInTemplates(templatesDir string, force bool) error {
+	for _, name := range builtInRoleTemplates {
+		targetDir := filepath.Join(templatesDir, name)
+		if err := seedEmbeddedTemplate(name, targetDir, force); err != nil {
+			return fmt.Errorf("failed to seed template %s: %w", name, err)
+		}
+	}
+	return nil
+}
+
+// seedEmbeddedTemplate copies an embedded template by name into targetDir.
+func seedEmbeddedTemplate(name, targetDir string, force bool) error {
+	templateBase := "embeds/templates/" + name
+
+	// Check the template exists in embeds
+	if _, err := EmbedsFS.ReadDir(templateBase); err != nil {
+		return nil // Template not embedded, skip silently
+	}
+
+	if err := os.MkdirAll(targetDir, 0755); err != nil {
+		return fmt.Errorf("create dir %s: %w", targetDir, err)
+	}
+
+	return fs.WalkDir(EmbedsFS, templateBase, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		relPath, err := filepath.Rel(templateBase, path)
+		if err != nil {
+			return err
+		}
+		if relPath == "." {
+			return nil
+		}
+		targetPath := filepath.Join(targetDir, relPath)
+		if d.IsDir() {
+			return os.MkdirAll(targetPath, 0755)
+		}
+		data, err := EmbedsFS.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		if !force {
+			if _, err := os.Stat(targetPath); err == nil {
+				return nil
+			}
+		}
+		return os.WriteFile(targetPath, data, 0644)
+	})
+}
+
 // InitProjectOpts controls optional behavior for InitProject.
 type InitProjectOpts struct {
 	// SkipRuntimeCheck skips local container runtime detection.
@@ -583,6 +646,11 @@ func InitMachine(harnesses []api.Harness, opts ...InitMachineOpts) error {
 	// Seed default agnostic template
 	if err := SeedAgnosticTemplate(filepath.Join(templatesDir, "default"), opt.Force); err != nil {
 		return fmt.Errorf("failed to seed global default agnostic template: %w", err)
+	}
+
+	// Seed built-in role templates (code-reviewer, security-reviewer, etc.)
+	if err := SeedBuiltInTemplates(templatesDir, opt.Force); err != nil {
+		return fmt.Errorf("failed to seed role templates: %w", err)
 	}
 
 	for _, h := range harnesses {
