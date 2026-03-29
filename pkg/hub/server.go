@@ -1727,6 +1727,12 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/v1/agent/gcp-token", s.handleAgentGCPToken)
 	s.mux.HandleFunc("/api/v1/agent/gcp-identity-token", s.handleAgentGCPIdentityToken)
 
+	// Live activity feed (SSE stream of all agent events in a grove)
+	s.mux.HandleFunc("/api/v1/activity-feed", s.handleActivityFeed)
+
+	// Cost summary endpoint (aggregated cost data per grove)
+	// Matched by the grove routes handler for /api/v1/groves/{id}/cost-summary
+
 	// Public settings endpoint (no auth required for telemetry default, etc.)
 	s.mux.HandleFunc("/api/v1/settings/public", s.handlePublicSettings)
 

@@ -328,6 +328,12 @@ type ScionConfig struct {
 
 	Secrets []RequiredSecret `json:"secrets,omitempty" yaml:"secrets,omitempty"`
 
+	// Hub access scopes for agent-to-agent orchestration.
+	// When set in a template's scion-agent.yaml, these scopes are granted
+	// to the agent's JWT token, enabling it to create/manage other agents.
+	// Example scopes: "grove:agent:create", "grove:agent:lifecycle"
+	HubAccessScopes []string `json:"hub_access_scopes,omitempty" yaml:"hub_access_scopes,omitempty"`
+
 	// Agnostic template fields
 	AgentInstructions    string `json:"agent_instructions,omitempty" yaml:"agent_instructions,omitempty"`
 	SystemPrompt         string `json:"system_prompt,omitempty" yaml:"system_prompt,omitempty"`

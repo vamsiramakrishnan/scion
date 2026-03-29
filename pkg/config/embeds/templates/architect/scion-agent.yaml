@@ -4,3 +4,9 @@ agent_instructions: agents.md
 system_prompt: system-prompt.md
 env:
   SCION_ROLE: architect
+# Grant orchestration scopes so the architect can spawn sub-agents
+# (implementers, reviewers) and manage their lifecycle.
+hub_access_scopes:
+  - "grove:agent:create"
+  - "grove:agent:lifecycle"
+  - "grove:agent:notify"
