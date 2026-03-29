@@ -3613,14 +3613,6 @@ func (s *Server) handleGroveRoutes(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Check for nested /tasks path
-	if strings.HasPrefix(subPath, "tasks") {
-		taskPath := strings.TrimPrefix(subPath, "tasks")
-		taskPath = strings.TrimPrefix(taskPath, "/")
-		s.handleTasks(w, r, groveID, taskPath)
-		return
-	}
-
 	// Check for nested /settings path
 	if subPath == "settings" {
 		s.handleGroveSettings(w, r, groveID)
