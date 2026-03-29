@@ -80,6 +80,23 @@ var mpInfoCmd = &cobra.Command{
 	RunE:  runMPInfo,
 }
 
+var mpRegistriesCmd = &cobra.Command{
+	Use:   "registries",
+	Short: "List external registries for discovering MCP servers and skills",
+	Long: `Show known external registries where you can find more MCP servers,
+agent skills, and templates beyond the built-in marketplace.
+
+These registries include:
+  - Official MCP Server Registry (modelcontextprotocol/servers)
+  - Smithery.ai (2000+ community MCP servers)
+  - Awesome MCP Servers (curated community list)
+  - Claude Code Skills (official skill format)
+  - Gemini CLI Extensions
+  - MCP.run (serverless MCP hosting)
+  - Glama MCP Directory`,
+	RunE: runMPRegistries,
+}
+
 var (
 	mpTypeFilter     string
 	mpCategoryFilter string
@@ -92,6 +109,7 @@ func init() {
 	marketplaceCmd.AddCommand(mpListCmd)
 	marketplaceCmd.AddCommand(mpInstallCmd)
 	marketplaceCmd.AddCommand(mpInfoCmd)
+	marketplaceCmd.AddCommand(mpRegistriesCmd)
 
 	mpListCmd.Flags().StringVar(&mpTypeFilter, "type", "", "Filter by type (mcp-server, skill, template)")
 	mpListCmd.Flags().StringVar(&mpCategoryFilter, "category", "", "Filter by category (code, productivity, security, data, design, docs)")
@@ -242,7 +260,18 @@ func installMCPServer(item *config.MarketplaceItem, templateDir string) error {
 		return fmt.Errorf("write settings: %w", err)
 	}
 
-	fmt.Printf("%s%s  Installed MCP server %q into template %q%s\n", util.Bold, util.Green, item.Name, mpTemplate, util.Reset)
+	fmt.Printf("%s%s  Installed MCP server %q into template %q (Claude Code)%s\n", util.Bold, util.Green, item.Name, mpTemplate, util.Reset)
+
+	// Also install into Gemini settings.json if it exists
+	geminiSettingsDir := filepath.Join(templateDir, "home", ".gemini")
+	geminiSettingsPath := filepath.Join(geminiSettingsDir, "settings.json")
+	if _, err := os.Stat(geminiSettingsPath); err == nil {
+		installMCPServerGemini(item, geminiSettingsPath)
+	} else {
+		// Create Gemini config with MCP server too
+		installMCPServerGemini(item, geminiSettingsPath)
+	}
+
 	if len(item.RequiredEnv) > 0 {
 		fmt.Printf("\n%sRequired environment variables:%s\n", util.Bold, util.Reset)
 		for _, env := range item.RequiredEnv {
@@ -253,6 +282,44 @@ func installMCPServer(item *config.MarketplaceItem, templateDir string) error {
 		}
 	}
 	return nil
+}
+
+// installMCPServerGemini adds an MCP server to Gemini's settings.json.
+func installMCPServerGemini(item *config.MarketplaceItem, settingsPath string) {
+	var settings map[string]interface{}
+	if data, err := os.ReadFile(settingsPath); err == nil {
+		json.Unmarshal(data, &settings)
+	}
+	if settings == nil {
+		settings = make(map[string]interface{})
+	}
+
+	mcpServers, ok := settings["mcpServers"].(map[string]interface{})
+	if !ok {
+		mcpServers = make(map[string]interface{})
+	}
+
+	serverConfig := map[string]interface{}{
+		"type":    "stdio",
+		"command": item.MCPConfig.Command,
+		"args":    item.MCPConfig.Args,
+	}
+	if len(item.MCPConfig.Env) > 0 {
+		serverConfig["env"] = item.MCPConfig.Env
+	}
+	mcpServers[item.Name] = serverConfig
+	settings["mcpServers"] = mcpServers
+
+	settingsDir := filepath.Dir(settingsPath)
+	os.MkdirAll(settingsDir, 0755)
+	data, err := json.MarshalIndent(settings, "", "  ")
+	if err != nil {
+		return
+	}
+	if err := os.WriteFile(settingsPath, data, 0644); err != nil {
+		return
+	}
+	fmt.Printf("%s%s  Installed MCP server %q into template %q (Gemini CLI)%s\n", util.Bold, util.Green, item.Name, mpTemplate, util.Reset)
 }
 
 func installSkill(item *config.MarketplaceItem, templateDir string) error {
@@ -301,4 +368,28 @@ func runMPInfo(cmd *cobra.Command, args []string) error {
 		}
 	}
 	return fmt.Errorf("item %q not found", name)
+}
+
+func runMPRegistries(cmd *cobra.Command, args []string) error {
+	registries := config.KnownRegistries()
+
+	fmt.Printf("\n%sExternal Registries%s — discover more MCP servers and skills\n\n", util.Bold, util.Reset)
+
+	for _, r := range registries {
+		fmt.Printf("  %s%s%s [%s]\n", util.Bold, r.Name, util.Reset, r.Type)
+		fmt.Printf("  %s\n", r.Description)
+		fmt.Printf("  %s%s%s\n\n", util.Dim, r.URL, util.Reset)
+	}
+
+	fmt.Printf("%sTo install from Smithery:%s\n", util.Bold, util.Reset)
+	fmt.Printf("  npx @smithery/cli install <server-name>\n\n")
+
+	fmt.Printf("%sTo install from MCP official:%s\n", util.Bold, util.Reset)
+	fmt.Printf("  scion marketplace install github --template <template>\n\n")
+
+	fmt.Printf("%sTo manually add any MCP server:%s\n", util.Bold, util.Reset)
+	fmt.Printf("  Edit your template's home/.claude/settings.json or home/.gemini/settings.json\n")
+	fmt.Printf("  and add the server to the mcpServers object.\n\n")
+
+	return nil
 }

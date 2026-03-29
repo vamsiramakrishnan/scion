@@ -48,6 +48,64 @@ type MCPServerConfig struct {
 	Env map[string]string `json:"env,omitempty" yaml:"env,omitempty"`
 }
 
+// ExternalRegistries lists known registries where MCP servers and skills
+// can be discovered. These are real, live registries maintained by the community.
+type ExternalRegistry struct {
+	Name        string `json:"name"`
+	URL         string `json:"url"`
+	Description string `json:"description"`
+	Type        string `json:"type"` // "mcp", "skills", "templates"
+}
+
+// KnownRegistries returns the list of external registries that SCION
+// can pull from. These are real sources maintained by the MCP and AI community.
+func KnownRegistries() []ExternalRegistry {
+	return []ExternalRegistry{
+		{
+			Name:        "MCP Official",
+			URL:         "https://github.com/modelcontextprotocol/servers",
+			Description: "Official MCP server implementations by Anthropic (GitHub, Slack, Google Drive, Puppeteer, PostgreSQL, etc.)",
+			Type:        "mcp",
+		},
+		{
+			Name:        "Smithery",
+			URL:         "https://smithery.ai",
+			Description: "Community MCP server registry with 2000+ servers — install via `npx @smithery/cli install <server>`",
+			Type:        "mcp",
+		},
+		{
+			Name:        "Awesome MCP Servers",
+			URL:         "https://github.com/punkpeye/awesome-mcp-servers",
+			Description: "Curated list of community MCP servers organized by category (databases, APIs, dev tools, AI, etc.)",
+			Type:        "mcp",
+		},
+		{
+			Name:        "Claude Code Skills",
+			URL:         "https://github.com/anthropics/claude-code",
+			Description: "Official Claude Code skills in .claude/skills/ format — markdown instruction files for specialized tasks",
+			Type:        "skills",
+		},
+		{
+			Name:        "Gemini CLI Extensions",
+			URL:         "https://github.com/google-gemini/gemini-cli",
+			Description: "Gemini CLI supports MCP servers in .gemini/settings.json and custom tool extensions",
+			Type:        "mcp",
+		},
+		{
+			Name:        "MCP.run",
+			URL:         "https://www.mcp.run",
+			Description: "Serverless MCP server hosting — run MCP servers without local installation via WebAssembly",
+			Type:        "mcp",
+		},
+		{
+			Name:        "Glama MCP Directory",
+			URL:         "https://glama.ai/mcp/servers",
+			Description: "MCP server directory with search, filtering, and installation instructions",
+			Type:        "mcp",
+		},
+	}
+}
+
 // BuiltInMarketplace returns the curated list of marketplace items.
 // These are sourced from:
 // - Official MCP server registry (github.com/modelcontextprotocol/servers)
