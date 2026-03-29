@@ -27,8 +27,11 @@ import (
 
 // Default configuration values
 const (
-	DefaultReadBufferSize  = 4096
-	DefaultWriteBufferSize = 4096
+	// Buffer sizes tuned for the control channel which carries multiplexed
+	// streams (PTY data, HTTP tunneling). Larger buffers reduce syscall
+	// overhead for bursty traffic like terminal output and file transfers.
+	DefaultReadBufferSize  = 32768 // 32KB (was 4KB)
+	DefaultWriteBufferSize = 32768 // 32KB (was 4KB)
 	DefaultPingInterval    = 30 * time.Second
 	DefaultPongWait        = 60 * time.Second
 	DefaultWriteWait       = 10 * time.Second

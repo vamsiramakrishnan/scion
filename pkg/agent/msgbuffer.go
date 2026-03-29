@@ -31,16 +31,23 @@ import (
 // consecutive messages into a single delivery.
 //
 // Behavior:
-//   - When a message arrives for an agent, a 2-second timer starts.
+//   - When a message arrives for an agent, a debounce timer starts.
 //   - If additional messages arrive before the timer fires, they are appended
 //     to the buffer and the timer is reset (debounce).
-//   - When the timer finally fires (2 seconds after the LAST message), all
+//   - When the timer finally fires (bufferDelay after the LAST message), all
 //     buffered messages are concatenated and delivered as a single string.
+//   - A maximum window (maxDelay) caps the total buffering time, ensuring
+//     delivery within a bounded time even during sustained message bursts.
 //   - Interrupt messages bypass the buffer entirely for immediate delivery.
 type MessageBuffer struct {
 	// bufferDelay is the debounce window duration. Each new message resets
 	// the timer to this duration from the current time.
 	bufferDelay time.Duration
+
+	// maxDelay is the maximum time a message can be buffered before forced
+	// delivery. Prevents unbounded delay during sustained bursts.
+	// If zero, defaults to 3x bufferDelay.
+	maxDelay time.Duration
 
 	// deliverFunc is the callback that performs actual message delivery via tmux.
 	// It receives the agent ID, the concatenated message text, and the interrupt flag.
@@ -52,16 +59,19 @@ type MessageBuffer struct {
 
 // agentBuffer holds the pending messages and timer for a single agent.
 type agentBuffer struct {
-	messages []string    // accumulated messages waiting for delivery
-	timer    *time.Timer // debounce timer; fires to trigger delivery
+	messages  []string    // accumulated messages waiting for delivery
+	timer     *time.Timer // debounce timer; fires to trigger delivery
+	firstSeen time.Time   // when the first message in this batch arrived
 }
 
 // NewMessageBuffer creates a new MessageBuffer with the given debounce delay
 // and delivery function. The deliverFunc is called asynchronously when the
 // buffer flushes — it should perform the actual tmux send-keys delivery.
+// The max delivery window defaults to 3x the debounce delay.
 func NewMessageBuffer(delay time.Duration, deliverFunc func(agentID string, message string, interrupt bool) error) *MessageBuffer {
 	return &MessageBuffer{
 		bufferDelay: delay,
+		maxDelay:    3 * delay,
 		deliverFunc: deliverFunc,
 		buffers:     make(map[string]*agentBuffer),
 	}
@@ -70,21 +80,39 @@ func NewMessageBuffer(delay time.Duration, deliverFunc func(agentID string, mess
 // Send queues a message for buffered delivery to the given agent.
 // The message is added to the agent's buffer and the debounce timer is
 // started (or reset if already running). The actual delivery occurs
-// asynchronously once the timer fires.
+// asynchronously once the timer fires, or when the max window is reached.
 func (mb *MessageBuffer) Send(agentID string, message string) {
 	mb.mu.Lock()
 	defer mb.mu.Unlock()
 
+	now := time.Now()
 	buf, exists := mb.buffers[agentID]
 	if !exists {
 		// First message for this agent — create a new buffer entry.
-		buf = &agentBuffer{}
+		buf = &agentBuffer{firstSeen: now}
 		mb.buffers[agentID] = buf
 	}
 
 	// Append the message to the pending list.
 	buf.messages = append(buf.messages, message)
 	util.Debugf("msgbuffer: queued message for agent %s (%d pending)", agentID, len(buf.messages))
+
+	// Check if we've exceeded the max buffering window. If so, flush
+	// immediately rather than resetting the debounce timer. This prevents
+	// unbounded delay during sustained message bursts (e.g., 10 messages
+	// arriving 500ms apart would otherwise delay delivery by 7+ seconds).
+	maxDelay := mb.maxDelay
+	if maxDelay <= 0 {
+		maxDelay = 3 * mb.bufferDelay
+	}
+	if now.Sub(buf.firstSeen) >= maxDelay {
+		if buf.timer != nil {
+			buf.timer.Stop()
+		}
+		// Flush outside the lock
+		go mb.flush(agentID)
+		return
+	}
 
 	// Reset or start the debounce timer. If a timer is already running,
 	// stop it first so we can restart with a fresh delay window.

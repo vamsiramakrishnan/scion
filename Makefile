@@ -14,7 +14,7 @@ GOLANGCI_LINT := $(shell command -v golangci-lint 2>/dev/null || echo $(shell go
 
 .DEFAULT_GOAL := help
 
-.PHONY: all build install test test-fast vet lint golangci-lint web web-typecheck fmt ci ci-full clean help container-sciontool container-scion container-binaries
+.PHONY: all build install test test-fast vet lint golangci-lint web web-typecheck fmt ci ci-full clean help container-sciontool container-scion container-binaries bench bench-compare
 
 ## all: Build the web frontend, then compile the Go binary with embedded assets
 all: web install
@@ -112,6 +112,19 @@ ci: fmt lint test-fast build
 ci-full: fmt web web-typecheck lint golangci-lint test-fast build
 	@echo ""
 	@echo "CI (full) passed."
+
+## bench: Run all performance benchmarks
+bench:
+	@echo "Running benchmarks..."
+	@go test -bench=. -benchmem -run=^$$ ./pkg/wsprotocol/ ./pkg/hub/ ./pkg/agent/ 2>/dev/null || \
+		echo "Note: Some benchmarks may require -tags to build (e.g., no_sqlite)."
+
+## bench-compare: Run benchmarks and save results for comparison (use benchstat)
+bench-compare:
+	@echo "Running benchmarks (saving to bench-new.txt)..."
+	@go test -bench=. -benchmem -count=5 -run=^$$ ./pkg/wsprotocol/ ./pkg/hub/ ./pkg/agent/ > bench-new.txt 2>/dev/null || true
+	@echo "Results saved to bench-new.txt"
+	@echo "Compare with: benchstat bench-old.txt bench-new.txt"
 
 ## clean: Remove build artifacts
 clean:
