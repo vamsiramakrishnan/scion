@@ -133,6 +133,14 @@ type StatusUpdate struct {
 	CurrentTurns      *int   `json:"currentTurns,omitempty"`
 	CurrentModelCalls *int   `json:"currentModelCalls,omitempty"`
 	StartedAt         string `json:"startedAt,omitempty"`
+
+	// Cost tracking — populated from harness-native telemetry (OTel metrics).
+	// These are cumulative values for the agent's lifetime.
+	InputTokens  *int64   `json:"inputTokens,omitempty"`
+	OutputTokens *int64   `json:"outputTokens,omitempty"`
+	TotalTokens  *int64   `json:"totalTokens,omitempty"`
+	CostUSD      *float64 `json:"costUsd,omitempty"`
+	ModelName    string   `json:"modelName,omitempty"`
 }
 
 // Client is a Hub API client for sciontool.

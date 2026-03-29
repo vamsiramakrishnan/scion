@@ -62,6 +62,7 @@ import '../components/shared/header.js';
 import '../components/shared/breadcrumb.js';
 import '../components/shared/status-badge.js';
 import '../components/shared/debug-panel.js';
+import '../components/shared/command-palette.js';
 
 // Profile shell (lazy-loaded with profile routes)
 // import '../components/profile/profile-shell.js';
@@ -134,6 +135,9 @@ const ROUTES: RouteConfig[] = [
   { pattern: /^\/agents\/[^/]+\/configure$/, tag: 'scion-page-agent-configure', load: () => import('../components/pages/agent-configure.js') },
   { pattern: /^\/agents\/[^/]+\/terminal$/, tag: 'scion-page-terminal', load: () => import('../components/pages/terminal.js') },
   { pattern: /^\/agents\/[^/]+$/, tag: 'scion-page-agent-detail', load: () => import('../components/pages/agent-detail.js') },
+  // New pages: Activity Feed, Cost Dashboard
+  { pattern: /^\/groves\/[^/]+\/activity$/, tag: 'scion-page-activity-feed', load: () => import('../components/pages/activity-feed.js') },
+  { pattern: /^\/groves\/[^/]+\/costs$/, tag: 'scion-page-cost-dashboard', load: () => import('../components/pages/cost-dashboard.js') },
 ];
 
 /**
@@ -201,6 +205,11 @@ async function init(): Promise<void> {
 
   // Setup client-side router for navigation
   setupRouter();
+
+  // Add global command palette (Cmd+K / Ctrl+K)
+  if (!document.querySelector('scion-command-palette')) {
+    document.body.appendChild(document.createElement('scion-command-palette'));
+  }
 
   // Disconnect SSE on page unload
   window.addEventListener('beforeunload', () => {

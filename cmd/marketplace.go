@@ -18,6 +18,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 
@@ -97,6 +98,24 @@ These registries include:
 	RunE: runMPRegistries,
 }
 
+var mpPullCmd = &cobra.Command{
+	Use:   "pull <github-url> [--template <template>]",
+	Short: "Pull skills from a GitHub repo into a template",
+	Long: `Clone a GitHub repository containing agent skills (SKILL.md files)
+and install them into a template's skills directory.
+
+Works with repos following the Agent Skills standard (agentskills.io):
+  - Claude Code skills (.claude/skills/)
+  - Codex skills (.agents/skills/)
+  - Generic skills (skills/ or root SKILL.md files)
+
+Examples:
+  scion marketplace pull https://github.com/openai/skills --template default
+  scion marketplace pull https://github.com/travisvn/awesome-claude-skills --template code-reviewer
+  scion marketplace pull https://github.com/alirezarezvani/claude-skills --template fullstack-dev`,
+	RunE: runMPPull,
+}
+
 var (
 	mpTypeFilter     string
 	mpCategoryFilter string
@@ -110,12 +129,14 @@ func init() {
 	marketplaceCmd.AddCommand(mpInstallCmd)
 	marketplaceCmd.AddCommand(mpInfoCmd)
 	marketplaceCmd.AddCommand(mpRegistriesCmd)
+	marketplaceCmd.AddCommand(mpPullCmd)
 
 	mpListCmd.Flags().StringVar(&mpTypeFilter, "type", "", "Filter by type (mcp-server, skill, template)")
 	mpListCmd.Flags().StringVar(&mpCategoryFilter, "category", "", "Filter by category (code, productivity, security, data, design, docs)")
 	mpListCmd.Flags().BoolVar(&mpFormatJSON, "json", false, "Output as JSON")
 
 	mpInstallCmd.Flags().StringVar(&mpTemplate, "template", "default", "Target template to install into")
+	mpPullCmd.Flags().StringVar(&mpTemplate, "template", "default", "Target template to install skills into")
 }
 
 func runMPList(cmd *cobra.Command, args []string) error {
@@ -368,6 +389,96 @@ func runMPInfo(cmd *cobra.Command, args []string) error {
 		}
 	}
 	return fmt.Errorf("item %q not found", name)
+}
+
+func runMPPull(cmd *cobra.Command, args []string) error {
+	if len(args) == 0 {
+		return fmt.Errorf("GitHub URL required. Example: scion marketplace pull https://github.com/openai/skills --template default")
+	}
+	repoURL := args[0]
+
+	// Resolve template directory
+	globalDir, err := config.GetGlobalDir()
+	if err != nil {
+		return fmt.Errorf("failed to get global dir: %w", err)
+	}
+	templateDir := filepath.Join(globalDir, "templates", mpTemplate)
+	if _, err := os.Stat(templateDir); os.IsNotExist(err) {
+		return fmt.Errorf("template %q not found", mpTemplate)
+	}
+
+	// Create a temp directory for cloning
+	tmpDir, err := os.MkdirTemp("", "scion-marketplace-pull-*")
+	if err != nil {
+		return fmt.Errorf("create temp dir: %w", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	fmt.Printf("Cloning %s...\n", repoURL)
+
+	// Shallow clone the repo
+	cloneCmd := exec.Command("git", "clone", "--depth=1", repoURL, tmpDir)
+	cloneCmd.Stdout = os.Stdout
+	cloneCmd.Stderr = os.Stderr
+	if err := cloneCmd.Run(); err != nil {
+		return fmt.Errorf("git clone failed: %w", err)
+	}
+
+	// Search for SKILL.md files in common locations
+	skillDirs := []string{
+		filepath.Join(tmpDir, ".claude", "skills"),
+		filepath.Join(tmpDir, ".agents", "skills"),
+		filepath.Join(tmpDir, "skills"),
+		tmpDir, // root-level SKILL.md files
+	}
+
+	targetSkillsDir := filepath.Join(templateDir, "skills")
+	if err := os.MkdirAll(targetSkillsDir, 0755); err != nil {
+		return fmt.Errorf("create skills dir: %w", err)
+	}
+
+	installed := 0
+	for _, dir := range skillDirs {
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			continue
+		}
+		for _, entry := range entries {
+			if entry.IsDir() {
+				// Check for SKILL.md inside the directory
+				skillFile := filepath.Join(dir, entry.Name(), "SKILL.md")
+				if _, err := os.Stat(skillFile); err == nil {
+					destDir := filepath.Join(targetSkillsDir, entry.Name())
+					os.MkdirAll(destDir, 0755)
+					data, _ := os.ReadFile(skillFile)
+					if err := os.WriteFile(filepath.Join(destDir, "SKILL.md"), data, 0644); err == nil {
+						fmt.Printf("  %s%s  %s%s\n", util.Bold, util.Green, entry.Name(), util.Reset)
+						installed++
+					}
+				}
+			} else if strings.HasSuffix(entry.Name(), ".md") && entry.Name() != "README.md" && entry.Name() != "CHANGELOG.md" {
+				// Copy standalone .md skill files
+				data, _ := os.ReadFile(filepath.Join(dir, entry.Name()))
+				if len(data) > 0 {
+					destName := strings.TrimSuffix(entry.Name(), ".md")
+					destDir := filepath.Join(targetSkillsDir, destName)
+					os.MkdirAll(destDir, 0755)
+					if err := os.WriteFile(filepath.Join(destDir, "SKILL.md"), data, 0644); err == nil {
+						fmt.Printf("  %s%s  %s%s\n", util.Bold, util.Green, destName, util.Reset)
+						installed++
+					}
+				}
+			}
+		}
+	}
+
+	if installed == 0 {
+		fmt.Println("No skills found in repository. Expected SKILL.md files in .claude/skills/, .agents/skills/, or skills/")
+	} else {
+		fmt.Printf("\n%sInstalled %d skills into template %q%s\n", util.Bold, installed, mpTemplate, util.Reset)
+	}
+
+	return nil
 }
 
 func runMPRegistries(cmd *cobra.Command, args []string) error {
