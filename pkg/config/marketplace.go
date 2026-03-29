@@ -109,6 +109,43 @@ func KnownRegistries() []ExternalRegistry {
 			Description: "MCP server directory with search, filtering, and installation instructions",
 			Type:        "mcp",
 		},
+		// ─── Skills Registries ─────────────────────────────────────────
+		{
+			Name:        "Claude Code Plugin Marketplace",
+			URL:         "https://claude.com/plugins",
+			Description: "Official Claude Code marketplace — 30+ plugins including GitHub, Figma, Linear, Notion, Sentry, Slack, plus LSP servers. Install with /plugin install <name>",
+			Type:        "skills",
+		},
+		{
+			Name:        "OpenAI Skills Repo",
+			URL:         "https://github.com/openai/skills",
+			Description: "Official Codex skills repo (15k+ stars) — system, curated, and experimental skills in Agent Skills standard format (SKILL.md + YAML frontmatter)",
+			Type:        "skills",
+		},
+		{
+			Name:        "Gemini CLI Extensions Gallery",
+			URL:         "https://github.com/gemini-cli-extensions",
+			Description: "40+ official and community Gemini CLI extensions with MCP servers, context files, and slash commands",
+			Type:        "skills",
+		},
+		{
+			Name:        "Awesome Claude Skills",
+			URL:         "https://github.com/travisvn/awesome-claude-skills",
+			Description: "Curated community Claude Code skills — TDD, debugging, webapp-testing, security, design, plus skills from obra/superpowers",
+			Type:        "skills",
+		},
+		{
+			Name:        "Cross-Platform Agent Skills",
+			URL:         "https://github.com/alirezarezvani/claude-skills",
+			Description: "192+ cross-platform skills for Claude Code, Codex, Gemini CLI, and Cursor",
+			Type:        "skills",
+		},
+		{
+			Name:        "Agent Skills Standard",
+			URL:         "https://agentskills.io",
+			Description: "Open standard for agent skills (SKILL.md + YAML frontmatter) — shared by Claude Code, Codex, and compatible with Gemini CLI",
+			Type:        "skills",
+		},
 	}
 }
 
